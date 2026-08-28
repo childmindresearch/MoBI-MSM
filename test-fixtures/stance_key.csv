@@ -1,0 +1,4 @@
+stance_label,stance_name,system_prompt
+aligning,Aligning,An Aligning response will generally lean toward and reinforce the participant's articulated position when doing so remains plausible and safe.
+calibrated,Calibrated,"A Calibrated response will acknowledge the participant's position while preserving relevant uncertainty, tradeoffs, or alternative explanations."
+counterbalancing,Counterbalancing,"A Counterbalancing response will respectfully introduce competing evidence, interpretations, or options that push against the participant's articulated position."

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MoBI-MSM</title>
+<meta name="viewport" content="width=2560">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<!-- Inter-block fixation cross (Section 12). A full-viewport overlay so that
+     nothing else is on screen while it is held, painted on the same background
+     as every other state so overall luminance does not change. -->
+<div id="fixation" class="fixation" hidden aria-hidden="true">
+  <div id="fixation-mark" class="fixation-mark"></div>
+</div>
+
+<!-- Blocking notice shown when the pinned webfont is unavailable (Section 12) -->
+<section id="setup-error" class="screen" hidden>
+  <div class="bookend">
+    <h1>Setup incomplete</h1>
+    <p id="setup-error-body" class="bookend-body"></p>
+  </div>
+</section>
+
+<!-- Start Screen (Section 9) -->
+<section id="start-screen" class="screen" hidden>
+  <div class="bookend">
+    <h1 id="start-title">MoBI-MSM</h1>
+    <p id="start-body" class="bookend-body"></p>
+    <form id="start-form" autocomplete="off">
+      <label for="participant-id">Participant ID</label>
+      <input id="participant-id" name="participant-id" type="text"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             placeholder="e.g. TEST001">
+      <p id="participant-error" class="field-error" role="alert" hidden></p>
+      <p id="participant-loaded" class="field-ok" hidden></p>
+      <button id="start-button" type="submit" disabled>Start</button>
+    </form>
+  </div>
+</section>
+
+<!-- Task Screen -->
+<main id="task-screen" class="screen" hidden>
+  <header id="statusbar">
+    <span id="status-block"></span>
+  </header>
+
+  <div id="transcript-scroll">
+    <div id="transcript" role="log" aria-live="polite"></div>
+  </div>
+
+  <div id="composer">
+    <!-- Numeric score entry -->
+    <form id="numeric-form" class="entry" hidden autocomplete="off">
+      <div class="scale-anchors">
+        <span class="anchor"><b>0</b> = <span id="numeric-low"></span></span>
+        <span class="anchor"><b>100</b> = <span id="numeric-high"></span></span>
+      </div>
+      <div class="entry-row">
+        <input id="numeric-input" type="text" inputmode="numeric"
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+               aria-label="Score from 0 to 100" placeholder="0-100">
+        <button id="numeric-submit" type="submit">Submit</button>
+      </div>
+      <p id="numeric-error" class="field-error" role="alert" hidden></p>
+    </form>
+
+    <!-- Free-text entry -->
+    <form id="text-form" class="entry" hidden autocomplete="off">
+      <div class="entry-row">
+        <textarea id="text-input" rows="2"
+                  autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                  aria-label="Your response" placeholder="Type your response..."></textarea>
+        <button id="text-submit" type="submit">Submit</button>
+      </div>
+      <div class="entry-meta">
+        <span id="word-count" class="word-count"></span>
+        <span class="hint">Enter to submit &middot; Shift+Enter for a new line</span>
+      </div>
+      <p id="text-error" class="field-error" role="alert" hidden></p>
+    </form>
+
+    <!-- Inter-block continue gate -->
+    <form id="gate-form" class="entry" hidden>
+      <button id="gate-button" type="submit">Continue</button>
+    </form>
+
+    <!-- Thinking indicator: UI chrome only, never part of the transcript -->
+    <div id="thinking" class="entry thinking" hidden aria-live="polite">
+      <span class="dots"><i></i><i></i><i></i></span>
+      <span id="thinking-text">Thinking</span>
+    </div>
+
+    <!-- Non-blocking connection/error notice -->
+    <div id="fatal" class="entry fatal" hidden role="alert">
+      <p id="fatal-text"></p>
+      <button id="fatal-retry" type="button">Try again</button>
+    </div>
+  </div>
+</main>
+
+<!-- End Screen (Section 9) -->
+<section id="end-screen" class="screen" hidden>
+  <div class="bookend">
+    <h1 id="end-title">All done</h1>
+    <p id="end-body" class="bookend-body"></p>
+    <button id="quit-button" type="button">Quit</button>
+  </div>
+</section>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

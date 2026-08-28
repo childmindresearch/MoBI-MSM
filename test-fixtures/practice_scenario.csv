@@ -1,0 +1,2 @@
+scenario_label,scenario_text,question_text,scale_low_label,scale_high_label,stance_label
+practice,"Some people plan their day around a consistent morning routine, while others prefer to decide what to do as the day goes.",How likely is it that following a consistent morning routine makes people more productive during the rest of the day?,Very unlikely,Very likely,calibrated

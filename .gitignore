@@ -1,0 +1,12 @@
+.env
+data/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# The embedded interface font IS tracked: a session cannot run without it.
+!app/static/fonts/ui.woff2
+
+# macOS
+.DS_Store

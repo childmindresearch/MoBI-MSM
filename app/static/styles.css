@@ -1,0 +1,491 @@
+/* MoBI-MSM participant interface.
+   Kiosk target: 27" QHD (2560x1440) at ~600 mm viewing distance -- no
+   responsive layout is required (Section 1).
+   Deliberately neutral: nothing in the visual treatment varies with Stance.
+
+   SIZES ARE SPECIFIED IN DEGREES OF VISUAL ANGLE, NOT PIXELS.
+   The screen is recorded and gaze collected concurrently, so what matters is
+   how large something is to the eye, not how many pixels it spans. `--deg` is
+   one degree of visual angle in CSS pixels; the server computes it from the rig
+   geometry in app/config.py (screen diagonal, native resolution, viewing
+   distance) and the client sets it on :root at load. Every size below is a
+   multiple of it, so a `1.22` reads directly as 1.22 degrees.
+
+   Moving to a different monitor or seating distance is a change in
+   app/config.py and nowhere else. The fallback in `--deg` below is only used if
+   the client cannot reach the server; it matches the configured rig.
+
+   Typical tracker accuracy is 0.5-1 degree, so the layout targets:
+     - Line spacing >= 1 deg, so a fixation resolves to a specific LINE of text
+       rather than a band of three.
+     - Gaps between messages >= 1.2 deg, so adjacent AOIs do not bleed together.
+     - Participant messages right, system/LLM messages left, giving large
+       horizontal separation between the two AOI classes.
+     - Content in the central region, away from the screen edges where tracker
+       accuracy falls off.
+     - Line length capped in `ch` so lines stay readable despite the wide
+       column -- long lines produce sloppy return sweeps and noisy reading data.
+
+   LUMINANCE IS HELD FLAT (Section 12).
+   Gaze is collected continuously and pupil diameter is often derived alongside
+   it, so any change in overall screen brightness triggers the pupillary light
+   reflex and shows up as noise indistinguishable from the response the protocol
+   is measuring. Every screen and every state -- Start, practice, all 12 blocks,
+   the thinking indicator, the gate, the fixation cross, and the End Screen --
+   sits on the same `--bg`. `--surface` is deliberately only a hair lighter than
+   `--bg` (cards are delineated by their borders, not by fill brightness) so the
+   screen's average luminance barely moves as the number of cards changes. This
+   is a hard constraint on future changes: no flashing, no strobing, no
+   full-screen colour washes, no success/error tints, no dark-mode toggle.
+
+   Section 12: exactly one embedded webfont, served from this app's own static
+   assets -- never a CDN or Google Fonts request. The `ch`-based column measure
+   depends on that font's metrics, so a system-font substitution would silently
+   change line wrapping and AOI boundaries.
+   `font-display: block` keeps a fallback face from ever being painted. */
+@font-face {
+  font-family: 'MoBI UI';
+  src: url('/static/fonts/ui.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+}
+
+:root {
+  /* Fixed light scheme. Without this the UA may render form controls dark on a
+     dark-mode host, which is a mid-session luminance change (Section 12). */
+  color-scheme: light;
+
+  /* ONE DEGREE OF VISUAL ANGLE, in CSS pixels. Overwritten at load from the
+     server's rig geometry; this literal is the configured-rig fallback. */
+  --deg: 44.85px;
+
+  --bg: #faf9f7;
+  --surface: #fdfcfa;   /* near-identical to --bg: see luminance note above */
+  --ink: #232322;
+  --ink-soft: #56554f;
+  --ink-faint: #7c7b76;
+  --line: #e0ddd7;
+  --accent: #3d5a80;
+  --accent-ink: #ffffff;
+  --user-bubble: #e7eaf0;
+  --scenario-bg: #fdfcfa;
+  --error: #a4342b;
+  --ok: #2f6b4f;
+
+  /* --- Type scale, in degrees --- */
+  --font-body: calc(var(--deg) * 0.778);       /* primary reading size */
+  --font-scenario: calc(var(--deg) * 0.833);   /* the main stimulus text */
+  --font-title: calc(var(--deg) * 1.556);
+  --font-lede: calc(var(--deg) * 0.833);
+  --font-answer: calc(var(--deg) * 1.111);     /* participant numeric answers */
+  --font-entry: calc(var(--deg) * 1.222);      /* numeric entry field */
+  --font-aside: calc(var(--deg) * 0.667);      /* interstitials, errors */
+  --font-anchor: calc(var(--deg) * 0.611);     /* 0/100 scale anchors */
+  --font-meta: calc(var(--deg) * 0.556);       /* word count, hints, labels */
+  --font-chrome: calc(var(--deg) * 0.472);     /* RA status bar */
+  --font-thinking: calc(var(--deg) * 0.722);
+
+  /* --- Spacing, in degrees --- */
+  --gap-message: calc(var(--deg) * 1.222);     /* >= 1.2 deg between AOIs */
+  --pad-msg-y: calc(var(--deg) * 0.722);
+  --pad-msg-x: calc(var(--deg) * 0.944);
+  --pad-card-y: calc(var(--deg) * 1.111);
+  --pad-card-x: calc(var(--deg) * 1.333);
+  --radius: calc(var(--deg) * 0.5);
+
+  /* Layout column: ~35.6 deg wide, centred, keeping content off the edges
+     where tracker accuracy degrades. */
+  --col: calc(var(--deg) * 35.556);
+
+  /* Comfortable reading measure; the wide column separates AOIs, it does not
+     stretch the text. */
+  --measure: 58ch;
+
+  --font: 'MoBI UI', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: var(--font-body);
+  line-height: 1.6;        /* 44.8 px line spacing -- above the 1 deg floor */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Nothing in this interface is selectable or draggable: text selection is a
+   route to copy/paste, which would corrupt the keystroke stream (Section 10). */
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+input, textarea { user-select: text; -webkit-user-select: text; }
+
+.screen { height: 100vh; }
+[hidden] { display: none !important; }
+
+/* ---------- Session bookends ---------- */
+
+.bookend {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  width: var(--col);
+  margin: 0 auto;
+  padding: 0 calc(var(--deg) * 0.889);
+}
+
+.bookend > button { align-self: flex-start; }
+
+.bookend h1 {
+  font-size: var(--font-title);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0 0 calc(var(--deg) * 0.778);
+}
+
+.bookend-body {
+  font-size: var(--font-lede);
+  max-width: var(--measure);
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  margin: 0 0 calc(var(--deg) * 1.333);
+}
+
+#start-form { display: flex; flex-direction: column; align-items: flex-start; gap: calc(var(--deg) * 0.444); }
+
+#start-form label {
+  font-size: var(--font-meta);
+  font-weight: 600;
+  color: var(--ink-soft);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+#participant-id {
+  width: calc(var(--deg) * 13.333);
+  font: inherit;
+  padding: calc(var(--deg) * 0.5) calc(var(--deg) * 0.611);
+  border: 2px solid var(--line);
+  border-radius: calc(var(--deg) * 0.333);
+  background: var(--surface);
+}
+
+#participant-id:focus { outline: 3px solid var(--accent); outline-offset: 2px; }
+#participant-id.invalid { border-color: var(--error); }
+
+button {
+  font: inherit;
+  font-weight: 550;
+  padding: calc(var(--deg) * 0.5) calc(var(--deg) * 1.222);
+  border: 0;
+  border-radius: calc(var(--deg) * 0.333);
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+button:disabled { background: #c9c7c2; color: #f4f3f1; cursor: not-allowed; }
+button:not(:disabled):hover { filter: brightness(1.08); }
+
+.field-error { color: var(--error); font-size: var(--font-aside); margin: calc(var(--deg) * 0.111) 0; }
+.field-ok { color: var(--ok); font-size: var(--font-aside); margin: calc(var(--deg) * 0.111) 0; }
+
+/* ---------- Task screen ---------- */
+
+#task-screen { display: flex; flex-direction: column; }
+
+/* Peripheral chrome, kept small and low-contrast on purpose: it carries pacing
+   information for the RA and should not attract participant fixations. */
+#statusbar {
+  flex: 0 0 auto;
+  height: calc(var(--deg) * 1.444);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  font-size: var(--font-chrome);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+#transcript-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  /* Deliberately not `scroll-behavior: smooth`: smooth scrolling makes
+     scrollTop assignment asynchronous, so back-to-back updates never land, and
+     an animated reveal would add variance to when a message becomes readable. */
+  overscroll-behavior: contain;
+}
+
+#transcript {
+  width: var(--col);
+  margin: 0 auto;
+  padding: calc(var(--deg) * 1.556) calc(var(--deg) * 0.889) calc(var(--deg) * 1.333);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-message);
+}
+
+/* Message kinds */
+
+.msg { max-width: 100%; }
+
+.msg-prompt, .msg-llm, .msg-interstitial {
+  align-self: flex-start;
+  white-space: pre-wrap;
+}
+
+.msg-llm, .msg-prompt {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  border-top-left-radius: calc(var(--deg) * 0.167);
+  padding: var(--pad-msg-y) var(--pad-msg-x);
+  max-width: var(--measure);
+}
+
+.msg-interstitial {
+  color: var(--ink-faint);
+  font-size: var(--font-aside);
+  text-align: center;
+  align-self: center;
+  max-width: var(--measure);
+  padding: calc(var(--deg) * 0.222) 0;
+}
+
+.msg-user {
+  align-self: flex-end;
+  background: var(--user-bubble);
+  border-radius: var(--radius);
+  border-bottom-right-radius: calc(var(--deg) * 0.167);
+  padding: var(--pad-msg-y) var(--pad-msg-x);
+  max-width: var(--measure);
+  white-space: pre-wrap;
+}
+
+/* Numeric answers are single tokens and are the most frequently fixated AOI in
+   the transcript, so they get their own larger treatment. */
+.msg-user.numeric {
+  font-size: var(--font-answer);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  padding: calc(var(--deg) * 0.5) calc(var(--deg) * 1.111);
+  line-height: 1.2;
+}
+
+/* Scenario card: scenario text, its question, and the question's scale anchors.
+   The primary reading stimulus, so it takes the full column and the largest
+   body size in the interface. */
+
+.msg-scenario {
+  align-self: stretch;
+  background: var(--scenario-bg);
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--accent);
+  border-radius: var(--radius);
+  padding: var(--pad-card-y) var(--pad-card-x);
+}
+
+.scenario-text {
+  white-space: pre-wrap;
+  margin: 0;
+  font-size: var(--font-scenario);
+  line-height: 1.62;
+  max-width: var(--measure);
+}
+
+.scenario-question {
+  margin: calc(var(--deg) * 0.944) 0 0;
+  padding-top: calc(var(--deg) * 0.833);
+  border-top: 1px solid var(--line);
+  font-size: var(--font-scenario);
+  line-height: 1.62;
+  font-weight: 600;
+  white-space: pre-wrap;
+  max-width: var(--measure);
+}
+
+.scenario-scale {
+  display: flex;
+  justify-content: space-between;
+  gap: calc(var(--deg) * 1.333);
+  margin-top: calc(var(--deg) * 0.722);
+  font-size: var(--font-anchor);
+  color: var(--ink-faint);
+}
+
+.scenario-scale b { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+
+/* Inter-block gate: a chat-native inline element, not an interstitial screen */
+
+.msg-gate {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  border-top-left-radius: calc(var(--deg) * 0.167);
+  padding: var(--pad-msg-y) var(--pad-msg-x);
+  max-width: var(--measure);
+  white-space: pre-wrap;
+}
+
+/* ---------- Composer ---------- */
+
+#composer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  min-height: calc(var(--deg) * 5.278);
+  display: flex;
+  align-items: center;
+}
+
+.entry {
+  width: var(--col);
+  margin: 0 auto;
+  padding: calc(var(--deg) * 0.667) calc(var(--deg) * 0.889);
+}
+
+.entry-row { display: flex; gap: calc(var(--deg) * 0.556); align-items: flex-end; }
+
+#numeric-input {
+  width: calc(var(--deg) * 6.667);
+  font: inherit;
+  font-size: var(--font-entry);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  padding: calc(var(--deg) * 0.389) calc(var(--deg) * 0.556);
+  border: 2px solid var(--line);
+  border-radius: calc(var(--deg) * 0.333);
+  background: var(--surface);
+}
+
+#text-input {
+  flex: 1 1 auto;
+  font: inherit;
+  padding: calc(var(--deg) * 0.5) calc(var(--deg) * 0.611);
+  border: 2px solid var(--line);
+  border-radius: calc(var(--deg) * 0.333);
+  background: var(--surface);
+  resize: none;
+  max-height: calc(var(--deg) * 8.333);
+  line-height: 1.5;
+}
+
+#numeric-input:focus, #text-input:focus { outline: 3px solid var(--accent); outline-offset: 2px; }
+.invalid { border-color: var(--error) !important; }
+
+/* The anchors sit at opposite ends of the column, far enough apart that a
+   fixation on one is unambiguous. */
+.scale-anchors {
+  display: flex;
+  justify-content: space-between;
+  gap: calc(var(--deg) * 1.333);
+  font-size: var(--font-anchor);
+  color: var(--ink-faint);
+  margin-bottom: calc(var(--deg) * 0.444);
+}
+
+.scale-anchors b { color: var(--ink-soft); }
+
+.entry-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: calc(var(--deg) * 0.333);
+  font-size: var(--font-meta);
+  color: var(--ink-faint);
+}
+
+.word-count.short { color: var(--ink-faint); }
+.word-count.met { color: var(--ok); }
+
+/* Thinking indicator */
+
+.thinking {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--deg) * 0.444);
+  color: var(--ink-faint);
+  font-size: var(--font-thinking);
+}
+
+.dots { display: inline-flex; gap: calc(var(--deg) * 0.194); }
+
+.dots i {
+  width: calc(var(--deg) * 0.278);
+  height: calc(var(--deg) * 0.278);
+  border-radius: 50%;
+  background: var(--ink-faint);
+  animation: pulse 1.3s ease-in-out infinite;
+}
+
+.dots i:nth-child(2) { animation-delay: 0.18s; }
+.dots i:nth-child(3) { animation-delay: 0.36s; }
+
+@keyframes pulse {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-4px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dots i { animation: none; opacity: 0.55; }
+}
+
+/* ---------- Inter-block fixation cross (Section 12) ---------- */
+
+/* Covers the entire viewport, on the identical background, so the participant
+   sees the cross and nothing else and screen luminance is unchanged. */
+.fixation {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+/* Drawn from two rules rather than a "+" glyph, so its extent is exactly one
+   degree of visual angle regardless of the font in use. */
+.fixation-mark {
+  position: relative;
+  width: var(--deg);   /* exactly 1 degree of visual angle */
+  height: var(--deg);
+}
+
+.fixation-mark::before,
+.fixation-mark::after {
+  content: '';
+  position: absolute;
+  background: var(--ink-soft);
+}
+
+.fixation-mark::before {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: calc(var(--deg) * 0.083);
+  transform: translateY(-50%);
+}
+
+.fixation-mark::after {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: calc(var(--deg) * 0.083);
+  transform: translateX(-50%);
+}
+
+/* Error notice */
+
+.fatal { display: flex; align-items: center; gap: calc(var(--deg) * 0.667); color: var(--error); }
+.fatal p { margin: 0; flex: 1 1 auto; max-width: var(--measure); }
