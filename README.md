@@ -139,6 +139,56 @@ startup line before collecting real data:
 uv pip install -e ".[lsl]"
 ```
 
+If pylsl installs but the import still fails, the native library is missing
+rather than the Python package: `brew install labstreaminglayer/tap/lsl`.
+
+#### In LabRecorder
+
+The outlet is opened by the **server**, at startup — not by the browser, and
+not when a participant logs in. The browser is an HTTP client of the server and
+never speaks LSL, so every marker it reports (`messages_rendered`, scrolls,
+focus loss) is pushed by the server on its behalf. Practically: start the server
+once at the beginning of a collection day, hit Update in LabRecorder, and the
+stream stays listed across participants. One recording per participant is the
+natural unit, matching one `session_id`.
+
+| Field | Value |
+|---|---|
+| Name | `MoBI-MSM-Markers` |
+| Type | `Markers` |
+| Channels | 1, `string` |
+| Sample rate | 0 (irregular) |
+| source_id | `mobi-msm-participant-ui` |
+
+The stable `source_id` is what lets LabRecorder reconnect to the same logical
+stream if the server restarts mid-recording. Its flip side is that two servers
+running at once are indistinguishable to a recorder — don't.
+
+Because a missing pylsl degrades silently to JSONL-only, confirm the path the
+same way you confirm the model path:
+
+```bash
+.venv/bin/python scripts/check_lsl.py
+```
+
+With the server down that opens a self-test outlet through `app/markers.py`
+itself, resolves it back, and round-trips a marker. With the server up it
+reports the live outlet exactly as LabRecorder shows it, lists the other streams
+on the network, and exits non-zero if two outlets are advertising the same name.
+Add `--watch 120` to print markers as they arrive while you click through the
+task.
+
+Marker timestamps are pinned to the same `t_lsl` written into the JSONL, so the
+mirror and the XDF carry identical numbers rather than values captured
+microseconds apart. That is what makes the JSONL alignable against the other
+streams if a recording was started late or missed entirely.
+
+Two caveats on precision. Browser-owned events are stamped when the server
+receives the POST, not at browser paint — sub-millisecond on loopback, but not
+frame-accurate; the screen recording is the better reference for that. And
+`app_started` fires before anyone has hit Record, so it appears in the JSONL and
+not in the XDF.
+
 `llm_text_N_requested_at` / `_received_at` are recorded as ground-truth
 request/response times, independent of anything the UI does visually.
 

@@ -102,7 +102,12 @@ class MarkerStream:
         with self._lock:
             if self._outlet is not None:
                 try:
-                    self._outlet.push_sample([line])
+                    # Stamped with the same t_lsl carried in the JSONL rather than
+                    # letting push_sample stamp "now". The two are captured a few
+                    # microseconds apart otherwise, which makes aligning the JSONL
+                    # mirror against the XDF approximate; pinning it makes the
+                    # recorded timestamp and the mirrored one the same number.
+                    self._outlet.push_sample([line], timestamp=record["t_lsl"])
                 except Exception:  # pragma: no cover
                     log.exception("LSL push failed for event %s", event)
             self._write_line(session_id, line, event)
