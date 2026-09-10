@@ -86,6 +86,7 @@ response?" beneath it. Consequences worth knowing:
 | `app/llm.py` | Stance system prompts, block-local context, the 75-word cap, the per-turn closing that elicits the participant's next response, and the two providers (LiteLLM and a fake). |
 | `app/store.py` | SQLite persistence and CSV/JSON export. |
 | `app/markers.py` | LSL marker emission with a JSONL mirror. |
+| `scripts/check_xdf.py` | Spot-checks one finished recording against the protocol. |
 | `app/prompts.py` | All participant-facing copy, in one place. |
 | `app/static/` | The browser interface (no build step, no dependencies). |
 
@@ -177,6 +178,48 @@ reports the live outlet exactly as LabRecorder shows it, lists the other streams
 on the network, and exits non-zero if two outlets are advertising the same name.
 Add `--watch 120` to print markers as they arrive while you click through the
 task.
+
+#### After a session
+
+`scripts/check_xdf.py` reads one finished recording and reports whether it
+followed the protocol — while the participant is still in the room, and in
+time to fix the rig before the next one:
+
+```bash
+.venv/bin/python scripts/check_xdf.py sub-TEST001_ses-01.xdf
+```
+
+It needs the XDF and nothing else, so it runs on a copied-off recording
+anywhere: `uv pip install -e ".[analysis]"`. Findings are sorted by what an RA
+can do about them — problems that make the recording unusable, things to fix
+before the next participant (system-font fallback, display scaling, Record
+started late, a recorder dropping markers), and things to note and move on
+from (focus loss, fixation-cross drift, a slow LLM turn). It exits 0 clean, 1
+for notes, 2 for anything to fix.
+
+The protocol it checks against is imported from `app/session.py` and
+`app/config.py` rather than restated, so editing the flow updates the check
+with it. That matters for one inference in particular: because the flow is
+server-owned and forward-only, the task *cannot* skip a step, so a marker
+missing from the middle of an intact block is a recorder dropout rather than a
+protocol violation — and is reported as one. Markers that are out of order or
+duplicated cannot come from a dropout at all, and are reported more seriously.
+
+It also checks the *other* streams, which is where a full-modality rig tends
+to fail quietly: a stream that stops inside the task, one that recorded
+nothing at all, and — the one that is invisible without looking — a source
+stamping in a different time base. LSL's clock-offset records only correct for
+the difference between hosts, so an outlet that stamps `time.time()` where
+`lsl_local_clock()` was expected lands about 1.8e9 seconds from every other
+stream and cannot be aligned to a marker at all. That check loads the whole
+file; `--no-coverage` skips it on a very large recording in a hurry.
+
+`--timeline` prints every marker, participant free text excluded.
+
+The file is read with pyxdf's clock synchronisation **off**. Markers are
+stamped with the same `t_lsl` carried in their payload, and that equality is
+one of the things the check reports on; `synchronize_clocks=True` — pyxdf's
+default — rewrites the timestamps and breaks it.
 
 Marker timestamps are pinned to the same `t_lsl` written into the JSONL, so the
 mirror and the XDF carry identical numbers rather than values captured
