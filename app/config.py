@@ -46,8 +46,12 @@ REAL_BLOCK_COUNT = 12
 MIN_RESPONSE_WORDS = 15
 """Minimum whitespace-delimited tokens for User Text Response 1-3 (Section 6)."""
 
-MAX_LLM_WORDS = 50
-"""Hard cap on each LLM Text Response (Section 7)."""
+MAX_LLM_WORDS = 75
+"""Hard cap on each LLM Text Response (Section 7).
+
+Raised from the spec's original 50 because each reply now has to do two jobs:
+respond to what the participant wrote *and* invite their next response in the
+same message, rather than handing off to a separate standardized prompt."""
 
 SCORE_MIN = 0
 SCORE_MAX = 100

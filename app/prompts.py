@@ -18,9 +18,19 @@ CONFIDENCE_1 = (
 # Reads back the participant's own Answer Score 1 (Section 7).
 TEXT_1 = "You rated that {answer_score_1} out of 100. What made you give that score?"
 
-TEXT_2 = "What do you make of that response?"
-
-TEXT_3 = "Is there anything else you want to add before we move on?"
+# User Text Response 2 and 3 have no prompt message of their own: the LLM reply
+# that precedes them asks for the response itself, so the participant reads one
+# message instead of a reply followed by a standardized question (Section 7).
+# These are the input placeholders, and they are the fallback affordance -- if a
+# reply is capped mid-sentence or the model ignores its closing instruction, the
+# participant still sees what is being asked of them. Deliberately softer and
+# more generic than the old prompts, so they read as a hint on an empty box
+# rather than as a second question competing with the model's own.
+TEXT_PLACEHOLDER = {
+    "text_1": "Type your response...",
+    "text_2": "Type your reply...",
+    "text_3": "Type your reply...",
+}
 
 # Answer Score 2 restates the Question as a new message (Section 5, step 12).
 ANSWER_2 = "Thinking about it again:\n\n{question_text}\n\nEnter a whole number from 0 to 100."

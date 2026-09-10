@@ -66,10 +66,10 @@ Practice and real blocks follow the identical structure below; only the Scenario
 | 5 | User Text Response 1 prompt (dynamically templated with Answer Score 1) + input | Free-text input, ≥15 words | Type response, submit | user_text_1, word_count, timestamp_submitted |
 | 6 | Thinking indicator | Non-message UI state | Wait | — (see Section 7 for logging of real latency) |
 | 7 | LLM Text Response 1 | Chat message, ≤50 words | Read | llm_text_1, stance, timestamp_shown, model latency (from LSL-logged request/response times) |
-| 8 | User Text Response 2 prompt + input | Free-text input, ≥15 words | Type response, submit | user_text_2, word_count, timestamp_submitted |
+| 8 | User Text Response 2 input (no prompt message — step 7's reply asks for it) | Free-text input, ≥15 words | Type response, submit | user_text_2, word_count, timestamp_submitted |
 | 9 | Thinking indicator | Non-message UI state | Wait | — |
 | 10 | LLM Text Response 2 | Chat message, ≤50 words | Read | llm_text_2, timestamp_shown, model latency |
-| 11 | User Text Response 3 prompt + input | Free-text input, ≥15 words | Type response, submit | user_text_3, word_count, timestamp_submitted |
+| 11 | User Text Response 3 input (no prompt message — step 10's reply asks for it) | Free-text input, ≥15 words | Type response, submit | user_text_3, word_count, timestamp_submitted |
 | 12 | Answer Score 2 prompt (re-shown as a new chat message restating the Question) + input | Numeric input, 0–100 integer | Type score, submit | answer_score_2, timestamp_submitted |
 | 13 | Confidence Score 2 prompt + input | Numeric input, 0–100 integer | Type score, submit | confidence_score_2, timestamp_submitted |
 | 14 | Activation Score prompt + input | Numeric input, 0–100 integer | Type score, submit | activation_score, timestamp_submitted |
@@ -95,7 +95,9 @@ After Block 12's step 14, the flow goes directly to the End Screen — there is 
 
 **Context**: each block's LLM conversation is independent. The LLM has only the current block's Scenario, Question, and text/score turns exchanged so far within that block — there is no carryover of context from one block to the next.
 
-**Response length & delivery**: each LLM Text Response is capped at 50 words and is revealed in full at once — no token-by-token streaming.
+**Response length & delivery**: each LLM Text Response is capped at 75 words and is revealed in full at once — no token-by-token streaming.
+
+**Eliciting the next response**: LLM Text Response 1 and 2 each close by asking the participant for their next text response, in the model's own words, as the final sentence of the same message. There is no separate standardized prompt after them — the participant reads one message, not a reply followed by a fixed question. The instruction to close this way lives in the invariant response framing rather than in the Stance prompts, so how hard a participant is drawn out does not vary with the experimental manipulation; only tone does. Two constraints follow. The word cap protects the closing sentence when it trims, since that sentence is the only thing asking the participant for anything. And the model is instructed never to quote or ask about the participant's numeric rating or confidence, because its closing question is the last thing they read before Answer Score 2. Whether each delivered reply actually closed on a question is recorded per turn (Section 10) rather than assumed, and the input placeholder carries the ask for any turn where it did not. This replaces the earlier fixed prompts “What do you make of that response?” and “Is there anything else you want to add before we move on?”
 
 **Thinking indicator**: immediately after a User Text Response that triggers an LLM turn (steps 6 and 9 only — there is no LLM turn after User Text Response 3), a "thinking" icon appears. If the real response hasn't arrived within roughly 7 seconds (a tunable constant, not a hard cutoff), the indicator's text changes to a low-key "hang on, still thinking" state. This indicator is UI chrome only: it is never added to the chat transcript, never included in the model's context, and never something the participant can interact with. It is fully replaced by the real LLM Text Response whenever that response actually arrives — the UI does not force a synthetic reveal time or substitute placeholder content into the conversation.
 

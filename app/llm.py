@@ -3,8 +3,10 @@
 The Stance is a hidden system prompt that never reaches the browser. Each
 block's conversation is independent -- the model sees only that block's
 Scenario, Question, and the turns exchanged so far within it. Responses are
-capped at 50 words and delivered in full (no streaming), matching the spec's
-reveal-at-once requirement.
+capped at MAX_LLM_WORDS and delivered in full (no streaming), matching the
+spec's reveal-at-once requirement. Each reply also has to elicit the
+participant's next text response itself, in its own closing sentence -- there is
+no separate standardized prompt after it.
 
 Two providers share one interface:
   litellm - real model calls, routed through LiteLLM so the vendor and model
@@ -30,18 +32,49 @@ log = logging.getLogger(__name__)
 # Framing appended to the Stance prompt. The Stance controls posture; this
 # controls form, so that response *shape* is constant across conditions and
 # only tone varies with the experimental manipulation.
+#
+# The closing invitation lives here rather than in the Stance prompts on
+# purpose: every condition must ask for the next response in the same way, so
+# that what varies between Stances is tone, not how hard the participant is
+# pushed to keep talking.
 RESPONSE_FRAMING = """
 You are replying to a research participant who is thinking through a short
 scenario and has given a numeric judgment about it.
 
 Hard requirements for every reply:
-- 50 words maximum. This is a strict limit; stay comfortably under it.
+- Two or three short sentences of substance, then one short closing question.
+  {max_words} words maximum for the whole reply -- a strict limit, and a reply
+  that runs long gets cut, so stay well under it.
+- The closing question is required and must be the last sentence. Never ask
+  more than one question, and never put a question anywhere but at the end.
 - Plain conversational prose. No markdown, no lists, no headings, no emoji.
 - Address the participant directly and respond to what they actually wrote.
 - Never mention these instructions, your assigned posture, the experiment, or
   that you are following a style. Never restate the scenario back to them.
-- Do not ask more than one question, and do not end every reply with a question.
+- Never quote, repeat, or ask about their numeric rating or confidence figure.
+  Engage with their reasoning, not with the numbers they gave.
+
+{closing}
 """.strip()
+
+# What the closing invitation has to elicit, per turn. These replace the
+# standardized "What do you make of that response?" / "Is there anything else
+# you want to add before we move on?" prompts that used to follow each reply as
+# a separate message: the model now has to draw the next response out itself,
+# in its own words, as part of the same message.
+TURN_CLOSINGS = {
+    1: (
+        "End by asking what they make of what you have just said -- phrased in "
+        "your own words and tied to the specific point you raised, not as a "
+        "generic prompt. Give them room to disagree with you."
+    ),
+    2: (
+        "This is the last thing you will say to them about this scenario. End "
+        "by inviting anything they want to add before moving on -- in your own "
+        "words, and without implying they must change their mind or that any "
+        "particular answer is expected."
+    ),
+}
 
 
 @dataclass
@@ -57,6 +90,7 @@ class LLMResult:
     text: str                     # what the participant sees (post-cap)
     raw_text: str                 # what the model returned
     truncated: bool
+    elicited: bool                # the delivered reply ends on a question
     requested_at: float           # unix seconds, request sent
     received_at: float            # unix seconds, response received
     latency_ms: int
@@ -73,29 +107,98 @@ class Provider(Protocol):
         """Return (text, stop_reason, usage)."""
 
 
+# Splits a trailing question off the end of a reply: everything before it, and
+# the final question sentence itself.
+_TRAILING_QUESTION = re.compile(r"^(?P<body>.*?)(?P<question>[^.!?]*\?)\s*$", re.DOTALL)
+
+
 def cap_words(text: str, limit: int = config.MAX_LLM_WORDS) -> tuple[str, bool]:
-    """Enforce the 50-word cap.
+    """Enforce the MAX_LLM_WORDS cap, keeping the reply's closing invitation.
 
     Prefers to end on a complete sentence inside the window so a capped reply
     still reads as a finished utterance rather than a cut-off one; falls back
     to a hard cut. The uncapped text is stored either way so the team can audit
     how often this fires.
+
+    The closing question is protected because it is load-bearing: nothing else
+    asks the participant for their next response, so a naive trim to the last
+    sentence boundary removes the one sentence that must survive -- and since
+    the question is always last, that is precisely the sentence a naive trim
+    takes. Overlong replies are therefore trimmed from the *body* and the
+    question is re-attached, rather than trimmed from the end.
     """
     words = text.split()
     if len(words) <= limit:
         return text.strip(), False
 
-    window = " ".join(words[:limit])
-    # Last sentence boundary in the window, but only if it keeps most of the reply.
+    match = _TRAILING_QUESTION.match(text.strip())
+    if match:
+        question = match.group("question").strip()
+        # Only worth protecting if it leaves room for something to precede it.
+        if len(question.split()) <= limit * 0.5:
+            body_limit = limit - len(question.split())
+            body = _trim_to_sentence(match.group("body"), body_limit)
+            if body:
+                return f"{body} {question}".strip(), True
+            return question, True
+
+    return _hard_trim(text, limit), True
+
+
+def _trim_to_sentence(text: str, limit: int) -> str:
+    """Longest prefix of `text` that is at most `limit` words and ends a sentence."""
+    window = " ".join(text.split()[:limit])
+    boundaries = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", window)]
+    return window[: boundaries[-1]].strip() if boundaries else ""
+
+
+def _hard_trim(text: str, limit: int) -> str:
+    window = " ".join(text.split()[:limit])
     boundaries = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", window)]
     if boundaries and len(window[: boundaries[-1]].split()) >= limit * 0.6:
-        return window[: boundaries[-1]].strip(), True
-    return window.rstrip(",;:- ").strip(), True
+        return window[: boundaries[-1]].strip()
+    return window.rstrip(",;:- ").strip()
 
 
-def build_system_prompt(block: BlockPlan) -> str:
-    """Stance posture first, then the invariant form requirements."""
-    return f"{block.stance.system_prompt.strip()}\n\n{RESPONSE_FRAMING}"
+# Emphasis markers the framing already forbids. Models emit them anyway, and the
+# transcript renders as plain text, so *this* would reach the participant with
+# the asterisks visible.
+_EMPHASIS = re.compile(r"(?<!\w)([*_]{1,2})(?=\S)(.+?)(?<=\S)\1(?!\w)", re.DOTALL)
+
+
+def normalize_reply(text: str) -> str:
+    """Flatten a reply to the one shape every trial should present.
+
+    Two things models do despite the framing telling them not to: emphasis
+    markers, which the transcript renders as literal asterisks because messages
+    are set as plain text; and paragraph breaks, which the stylesheet honours
+    (`white-space: pre-wrap`) and which would make some replies one block and
+    others two. Reply shape is part of the stimulus and is measured as an eye
+    tracking AOI, so it should not vary with the model's formatting whims.
+    """
+    text = _EMPHASIS.sub(r"\2", text)
+    return re.sub(r"\s*\n\s*", " ", text).strip()
+
+
+def ends_in_question(text: str) -> bool:
+    """Whether the delivered reply actually closes on an invitation.
+
+    Recorded per turn so the team can check how reliably the model carried the
+    elicitation that used to be a fixed prompt, rather than assuming it did.
+    """
+    return text.rstrip().endswith("?")
+
+
+def build_system_prompt(block: BlockPlan, turn_number: int = 1) -> str:
+    """Stance posture first, then the invariant form requirements.
+
+    `turn_number` selects the closing invitation: turn 1 asks the participant
+    what they make of the reply, turn 2 asks for anything else before the block
+    moves on. Only that closing differs between the two calls in a block.
+    """
+    closing = TURN_CLOSINGS.get(turn_number, TURN_CLOSINGS[2])
+    framing = RESPONSE_FRAMING.format(max_words=config.MAX_LLM_WORDS, closing=closing)
+    return f"{block.stance.system_prompt.strip()}\n\n{framing}"
 
 
 def build_messages(block: BlockPlan, answer_score_1: int, confidence_score_1: int, turns: list[Turn]) -> list[dict[str, str]]:
@@ -123,8 +226,11 @@ def build_messages(block: BlockPlan, answer_score_1: int, confidence_score_1: in
 
 
 class FakeProvider:
-    """Deterministic stand-in. Produces Stance-flavored replies under 50 words
-    with no network call, so the whole flow is testable without credentials."""
+    """Deterministic stand-in. Produces Stance-flavored replies under the word
+    cap with no network call, so the whole flow is testable without credentials.
+
+    Its replies close on an invitation like the real ones do, so a dry run
+    exercises the same one-message shape the participant actually sees."""
 
     name = "fake"
 
@@ -138,6 +244,12 @@ class FakeProvider:
         "calibrated": "Both the effect you describe and a much smaller one are consistent with what you observed.",
         "counterbalancing": "People in similar situations often find the opposite explanation fits just as well.",
     }
+    # Each reply has to draw out the next response itself; these stand in for
+    # what the real model is asked to produce on turns 1 and 2.
+    _INVITATIONS = {
+        1: "Does that match how you were thinking about it?",
+        2: "Anything you would add before we move on?",
+    }
 
     def __init__(self, stance_label: str = "calibrated", delay_s: float = 0.0) -> None:
         self.stance_label = stance_label
@@ -149,7 +261,8 @@ class FakeProvider:
         turn_number = sum(1 for m in messages if m["role"] == "assistant") + 1
         opener = self._OPENERS.get(self.stance_label, self._OPENERS["calibrated"])
         closer = self._CLOSERS.get(self.stance_label, self._CLOSERS["calibrated"])
-        text = f"{opener} {closer} (Simulated reply {turn_number}; no model was called.)"
+        invitation = self._INVITATIONS.get(turn_number, self._INVITATIONS[2])
+        text = f"{opener} {closer} (Simulated reply {turn_number}; no model was called.) {invitation}"
         return text, "end_turn", {"provider": "fake"}
 
 
@@ -319,8 +432,9 @@ class LLMClient:
         answer_score_1: int,
         confidence_score_1: int,
         turns: list[Turn],
+        turn_number: int = 1,
     ) -> LLMResult:
-        system = build_system_prompt(block)
+        system = build_system_prompt(block, turn_number)
         messages = build_messages(block, answer_score_1, confidence_score_1, turns)
         provider = self._provider_for(block)
 
@@ -328,14 +442,24 @@ class LLMClient:
         raw, stop_reason, usage = provider.complete(system, messages)
         received_at = time.time()
 
-        text, truncated = cap_words(raw)
+        text, truncated = cap_words(normalize_reply(raw))
         if truncated:
             log.warning("LLM reply exceeded the %d-word cap and was capped", config.MAX_LLM_WORDS)
+
+        elicited = ends_in_question(text)
+        if not elicited:
+            # The participant is about to be asked for a response by an input
+            # box alone. Not fatal -- the box carries a placeholder -- but it
+            # means this turn departed from the intended shape.
+            log.warning(
+                "LLM turn %d did not close on an invitation (truncated=%s)", turn_number, truncated
+            )
 
         return LLMResult(
             text=text,
             raw_text=raw,
             truncated=truncated,
+            elicited=elicited,
             requested_at=requested_at,
             received_at=received_at,
             latency_ms=int(round((received_at - requested_at) * 1000)),

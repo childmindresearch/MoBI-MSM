@@ -47,13 +47,43 @@ That prints the actual reply, its word count, and the latency spread the
 participant would wait — worth checking against the 7 s threshold at which the
 thinking indicator changes text.
 
+It also prints `elicited=` per reply. Each reply has to ask the participant for
+their next response in its own closing sentence, because no separate prompt
+follows it (see below), so a run that reports `elicited=False` is one where the
+participant would have faced an input box with nothing asking them for anything.
+Check both turns before a collection day — the second one closes differently:
+
+```bash
+.venv/bin/python scripts/check_llm.py --turn 2 --repeat 5
+```
+
+### The two follow-up prompts
+
+User Text Response 2 and 3 have no prompt message of their own. The LLM reply
+before each of them asks for it, inside the same message, rather than the
+participant reading a reply and then a fixed "What do you make of that
+response?" beneath it. Consequences worth knowing:
+
+- The 75-word cap exists because each reply now does two jobs. `cap_words`
+  trims overlong replies from the *body* and re-attaches the closing question,
+  because a plain trim to the last sentence boundary removes exactly the
+  sentence that has to survive.
+- `llm_text_1_elicited` / `llm_text_2_elicited` record, per turn, whether the
+  delivered reply actually closed on a question, so this is auditable in the
+  data rather than assumed.
+- The input placeholder (`app/prompts.py`, `TEXT_PLACEHOLDER`) is the fallback
+  affordance for the turns where it did not.
+- The model is told never to quote or ask about the participant's numeric
+  rating, since its closing question is the last thing they read before being
+  asked for Answer Score 2.
+
 ## How it fits together
 
 | File | Role |
 |---|---|
 | `app/content.py` | Loads `assignment.csv` and the three key files; resolves one participant into a practice block plus 12 blocks. |
 | `app/session.py` | The per-block state machine (Section 5). Owns block index and step position. |
-| `app/llm.py` | Stance system prompts, block-local context, the 50-word cap, and the two providers (LiteLLM and a fake). |
+| `app/llm.py` | Stance system prompts, block-local context, the 75-word cap, the per-turn closing that elicits the participant's next response, and the two providers (LiteLLM and a fake). |
 | `app/store.py` | SQLite persistence and CSV/JSON export. |
 | `app/markers.py` | LSL marker emission with a JSONL mirror. |
 | `app/prompts.py` | All participant-facing copy, in one place. |
@@ -316,7 +346,7 @@ Set `MOBI_LLM_API_BASE` with, say, `anthropic/claude-opus-5` instead and LiteLLM
 sends Anthropic-shaped requests to the proxy's URL, which is not a route it
 serves; the app logs a warning at startup when it sees that combination.
 
-Protocol constants — the 15-word minimum, the 50-word cap, the 0–100 range,
+Protocol constants — the 15-word minimum, the 75-word cap, the 0–100 range,
 the 7 s thinking threshold, and the 500 ms fixation-cross hold — are named at
 the top of `app/config.py`.
 Participant-facing wording lives in `app/prompts.py`.
