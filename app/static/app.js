@@ -654,6 +654,10 @@ function showInput(spec) {
     els['text-input'].value = '';
     els['text-input'].classList.remove('invalid');
     els['text-input'].style.height = '';
+    // The LLM's own reply asks for responses 2 and 3, so there is no prompt
+    // message above the box. The placeholder is what tells the participant the
+    // box is theirs if a reply ever fails to close on a question.
+    els['text-input'].placeholder = spec.placeholder || 'Type your response...';
     hide(els['text-error']);
     updateWordCount();
     els['text-form'].hidden = false;

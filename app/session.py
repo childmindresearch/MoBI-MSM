@@ -92,6 +92,7 @@ class InputSpec:
     min_words: int | None = None
     scale_low: str | None = None
     scale_high: str | None = None
+    placeholder: str | None = None
     button: str = "Submit"
 
     def to_dict(self) -> dict[str, Any]:
@@ -248,6 +249,7 @@ class Session:
             return InputSpec(
                 step=step, field=STEP_FIELD[step], type="text",
                 min_words=config.MIN_RESPONSE_WORDS,
+                placeholder=prompts.TEXT_PLACEHOLDER.get(step),
             )
         if step == "gate":
             return InputSpec(step="gate", field="advanced_at", type="gate", button="Continue")
@@ -260,10 +262,9 @@ class Session:
             return prompts.CONFIDENCE_1
         if step == "text_1":
             return prompts.TEXT_1.format(answer_score_1=self._values["answer_score_1"])
-        if step == "text_2":
-            return prompts.TEXT_2
-        if step == "text_3":
-            return prompts.TEXT_3
+        # text_2 and text_3 deliberately have no prompt copy: the LLM reply
+        # that precedes them asks for the response itself, so the participant
+        # sees one message rather than a reply followed by a fixed question.
         if step == "answer_2":
             return prompts.ANSWER_2.format(question_text=self.block.scenario.question_text)
         if step == "confidence_2":
@@ -379,6 +380,7 @@ class Session:
             answer_score_1=int(self._values["answer_score_1"]),
             confidence_score_1=int(self._values["confidence_score_1"]),
             turns=list(self._turns),
+            turn_number=which,
         )
         self._turns.append(Turn("assistant", result.text))
 
@@ -386,16 +388,19 @@ class Session:
             f"llm_text_{which}": result.text,
             f"llm_text_{which}_raw": result.raw_text,
             f"llm_text_{which}_truncated": result.truncated,
+            f"llm_text_{which}_elicited": result.elicited,
             f"llm_text_{which}_requested_at": result.requested_at,
             f"llm_text_{which}_received_at": result.received_at,
             f"llm_text_{which}_latency_ms": result.latency_ms,
         }
 
+        # The reply is the only message shown: it responds to the participant
+        # and asks for their next response in the same breath, so no separate
+        # standardized prompt follows it.
         message = Message(self._next_id(), "llm", result.text)
         next_step: StepName = "text_2" if which == 1 else "text_3"
         self._step = next_step
-        prompt = Message(self._next_id(), "prompt", self._prompt_text(next_step))
-        view = self._view([message, prompt], self._input_spec())
+        view = self._view([message], self._input_spec())
         return result, updates, view
 
     # --- block metadata for persistence ---

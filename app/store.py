@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import sqlite3
 import threading
 from pathlib import Path
@@ -23,16 +24,18 @@ from typing import Any, Iterable
 
 from . import config
 
+log = logging.getLogger(__name__)
+
 # Per-block value columns, in the order the participant produces them.
 BLOCK_VALUE_COLUMNS: tuple[str, ...] = (
     "scenario_shown_at",
     "answer_score_1", "answer_score_1_at",
     "confidence_score_1", "confidence_score_1_at",
     "user_text_1", "user_text_1_words", "user_text_1_at",
-    "llm_text_1", "llm_text_1_raw", "llm_text_1_truncated",
+    "llm_text_1", "llm_text_1_raw", "llm_text_1_truncated", "llm_text_1_elicited",
     "llm_text_1_requested_at", "llm_text_1_received_at", "llm_text_1_latency_ms",
     "user_text_2", "user_text_2_words", "user_text_2_at",
-    "llm_text_2", "llm_text_2_raw", "llm_text_2_truncated",
+    "llm_text_2", "llm_text_2_raw", "llm_text_2_truncated", "llm_text_2_elicited",
     "llm_text_2_requested_at", "llm_text_2_received_at", "llm_text_2_latency_ms",
     "user_text_3", "user_text_3_words", "user_text_3_at",
     "answer_score_2", "answer_score_2_at",
@@ -94,7 +97,23 @@ class Store:
         self._conn.execute("PRAGMA synchronous=FULL")  # a lab run is not worth losing to a crash
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._add_missing_block_columns()
             self._conn.commit()
+
+    def _add_missing_block_columns(self) -> None:
+        """Bring an existing database up to the current block schema.
+
+        CREATE TABLE IF NOT EXISTS leaves an older `blocks` table alone, so a
+        database written before a column was added would fail the first UPDATE
+        that named it -- mid-session, on a participant. Columns here are only
+        ever added, never dropped or reordered, so a plain ADD COLUMN is the
+        whole migration and earlier rows simply hold NULL for the new ones.
+        """
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(blocks)")}
+        for column in (*BLOCK_META_COLUMNS, *BLOCK_VALUE_COLUMNS):
+            if column not in have:
+                self._conn.execute(f"ALTER TABLE blocks ADD COLUMN {column} TEXT")
+                log.info("Added missing column blocks.%s", column)
 
     # --- sessions ---
 

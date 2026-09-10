@@ -338,3 +338,57 @@ def test_session_records_rig_for_analysis(client):
                 "screen_w_px", "screen_h_px", "screen_diagonal_in"):
         assert key in payload, f"{key} missing from session_started"
     assert payload["px_per_degree"] == pytest.approx(44.85, abs=0.1)
+
+
+def test_llm_reply_elicits_the_next_response_itself(client):
+    """The reply is the only message shown before User Text Response 2 and 3.
+
+    The follow-up used to arrive as a second, standardized message ("What do you
+    make of that response?"). It is now the model's job to ask, inside its own
+    reply, so anything that reintroduces a separate prompt message here would
+    put two questions in front of the participant at once.
+    """
+    sid = client.post("/api/session", json={"participant_id": "TEST001"}).json()["session_id"]
+    client.post(f"/api/session/{sid}/submit", json={"step": "answer_1", "value": 40})
+    client.post(f"/api/session/{sid}/submit", json={"step": "confidence_1", "value": 60})
+
+    for step, next_step in (("text_1", "text_2"), ("text_2", "text_3")):
+        view = client.post(f"/api/session/{sid}/submit", json={"step": step, "value": WORDS}).json()
+        assert view["awaiting_llm"]
+
+        view = client.post(f"/api/session/{sid}/llm").json()
+        kinds = [m["kind"] for m in view["messages"]]
+        assert kinds == ["llm"], f"expected the reply alone, got {kinds}"
+        assert view["messages"][0]["text"].rstrip().endswith("?")
+
+        # The box still says what it wants, in case a reply ever fails to ask.
+        assert view["input"]["step"] == next_step
+        assert view["input"]["placeholder"]
+        assert view["input"]["min_words"] == config.MIN_RESPONSE_WORDS
+
+
+def test_elicitation_is_recorded_per_turn(client):
+    """Whether each reply actually closed on a question is auditable after the
+    fact, rather than assumed from the prompt."""
+    from app.store import get_store
+
+    sid = client.post("/api/session", json={"participant_id": "TEST002"}).json()["session_id"]
+    client.post(f"/api/session/{sid}/submit", json={"step": "answer_1", "value": 12})
+    client.post(f"/api/session/{sid}/submit", json={"step": "confidence_1", "value": 34})
+    client.post(f"/api/session/{sid}/submit", json={"step": "text_1", "value": WORDS})
+    client.post(f"/api/session/{sid}/llm")
+
+    row = dict(get_store().block_rows(sid)[0])
+    assert row["llm_text_1_elicited"] == "1"
+
+
+def test_reply_word_cap_matches_config(client):
+    """Replies now carry the follow-up too, so the cap is the only thing keeping
+    the on-screen stimulus a bounded size."""
+    sid = client.post("/api/session", json={"participant_id": "TEST001"}).json()["session_id"]
+    client.post(f"/api/session/{sid}/submit", json={"step": "answer_1", "value": 50})
+    client.post(f"/api/session/{sid}/submit", json={"step": "confidence_1", "value": 50})
+    client.post(f"/api/session/{sid}/submit", json={"step": "text_1", "value": WORDS})
+    view = client.post(f"/api/session/{sid}/llm").json()
+
+    assert len(view["messages"][0]["text"].split()) <= config.MAX_LLM_WORDS

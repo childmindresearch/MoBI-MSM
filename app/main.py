@@ -351,6 +351,7 @@ def llm_turn(session_id: str) -> dict[str, Any]:
     store.update_block(session_id, block_index, updates)
     _mark(session, "llm_response_received",
           latency_ms=result.latency_ms, truncated=result.truncated,
+          elicited=result.elicited,
           model=result.model, provider=result.provider,
           requested_at=result.requested_at, received_at=result.received_at,
           word_count=len(result.text.split()))
