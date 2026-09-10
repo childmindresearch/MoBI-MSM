@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""One-shot check that the real Claude API path works before a data-collection day.
+"""One-shot check that the real model path works before a data-collection day.
 
 Sends a single block-shaped request through the same code the task uses --
-same system prompt construction, same Stance, same 50-word cap -- and prints
-the reply plus the latency the participant would have waited.
+same LiteLLM call, same system prompt construction, same Stance, same 50-word
+cap -- and prints the reply plus the latency the participant would have waited.
 
     .venv/bin/python scripts/check_llm.py
     .venv/bin/python scripts/check_llm.py --stance counterbalancing
+    .venv/bin/python scripts/check_llm.py --model openai/gpt-5 --repeat 5
 """
 
 from __future__ import annotations
@@ -23,23 +24,52 @@ from app.content import ContentLibrary  # noqa: E402
 from app.llm import LLMClient, Turn, build_system_prompt  # noqa: E402
 
 
+def _missing_credentials(model: str) -> list[str]:
+    """Which vendor keys LiteLLM would look for and not find. Empty is fine."""
+    if config.LLM_API_BASE:
+        return []  # a proxy carries its own credentials
+    try:
+        import litellm
+
+        env = litellm.validate_environment(model=model)
+    except Exception:
+        return []  # unknown model or missing dependency -- let the real call report it
+    return [] if env.get("keys_in_environment") else list(env.get("missing_keys") or [])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--stance", default="calibrated", choices=["aligning", "calibrated", "counterbalancing"])
-    ap.add_argument("--provider", default="anthropic", choices=["anthropic", "fake"])
+    ap.add_argument("--provider", default="litellm", choices=["litellm", "fake"])
+    ap.add_argument("--model", default=None,
+                    help=f"LiteLLM model id to test instead of the configured {config.LLM_MODEL!r}")
     ap.add_argument("--repeat", type=int, default=1, help="Send N requests to sample latency spread")
     args = ap.parse_args()
 
-    if args.provider == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
-        print("ANTHROPIC_API_KEY is not set. Put it in .env or export it, then re-run.", file=sys.stderr)
-        return 2
+    if args.model:
+        # Set before the client is built, so every code path below -- including
+        # the credential check inside the provider -- sees the override.
+        os.environ["MOBI_LLM_MODEL"] = args.model
+        config.LLM_MODEL = args.model
+
+    if args.provider == "litellm":
+        missing = _missing_credentials(config.LLM_MODEL)
+        if missing:
+            print(f"No credentials found for {config.LLM_MODEL}. Set {', '.join(missing)} in .env "
+                  "or export it, then re-run. (Or set MOBI_LLM_API_BASE for a LiteLLM proxy.)",
+                  file=sys.stderr)
+            return 2
 
     lib = ContentLibrary()
     block = lib.practice
     stance = lib.stances[args.stance]
     block = type(block)(**{**block.__dict__, "stance": stance})
 
-    print(f"provider={args.provider}  model={config.LLM_MODEL}  effort={config.LLM_EFFORT}")
+    print(f"provider={args.provider}  model={config.LLM_MODEL}  effort={config.LLM_EFFORT or '(unset)'}")
+    if config.LLM_FALLBACK_MODELS:
+        print(f"fallbacks={', '.join(config.LLM_FALLBACK_MODELS)}")
+    if config.LLM_API_BASE:
+        print(f"api_base={config.LLM_API_BASE}")
     print(f"stance={stance.name}\n")
     print("--- system prompt ---")
     print(build_system_prompt(block))

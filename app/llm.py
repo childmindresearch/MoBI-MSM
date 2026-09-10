@@ -7,9 +7,11 @@ capped at 50 words and delivered in full (no streaming), matching the spec's
 reveal-at-once requirement.
 
 Two providers share one interface:
-  anthropic - the real Claude API, used for data collection.
-  fake      - a deterministic canned responder needing no credentials, for
-              development, tests, and dry runs.
+  litellm - real model calls, routed through LiteLLM so the vendor and model
+            are configuration (MOBI_LLM_MODEL) rather than code. Used for data
+            collection.
+  fake    - a deterministic canned responder needing no credentials, for
+            development, tests, and dry runs.
 """
 
 from __future__ import annotations
@@ -151,48 +153,133 @@ class FakeProvider:
         return text, "end_turn", {"provider": "fake"}
 
 
-class AnthropicProvider:
-    """Real Claude API calls.
+class LiteLLMProvider:
+    """Real model calls, routed through LiteLLM.
+
+    LiteLLM presents every supported vendor behind one OpenAI-shaped call, so
+    which model answers the participant is a configuration value rather than a
+    code change: `anthropic/claude-opus-5`, `openai/gpt-5`,
+    `gemini/gemini-2.5-pro`, `ollama/llama3.3` for a locally hosted model, and
+    so on. Credentials come from each vendor's own environment variable, or
+    from MOBI_LLM_API_BASE / MOBI_LLM_API_KEY when the lab routes everything
+    through a LiteLLM proxy.
 
     Non-streaming by design: the spec reveals each reply in full at once, and
-    the replies are short. Server-side refusal fallbacks are enabled so a
-    safety refusal degrades to another model rather than stalling a trial.
+    the replies are short. Configured fallback models are tried in order when
+    the primary one fails, so a vendor outage degrades to another model rather
+    than stalling a trial.
     """
 
-    name = "anthropic"
+    name = "litellm"
 
     def __init__(self, model: str | None = None, effort: str | None = None) -> None:
-        import anthropic  # imported lazily so the fake provider needs no dependency
+        import litellm  # imported lazily so the fake provider needs no dependency
 
-        self._anthropic = anthropic
+        # Vendors disagree about which optional parameters they accept, and a
+        # rejected parameter would fail the turn. Dropping the unsupported ones
+        # is what lets a single configuration move between models.
+        litellm.drop_params = True
+        # Nothing here should reach a third party beyond the model vendor.
+        litellm.telemetry = False
+        # LiteLLM logs two INFO lines per call, which would bury this app's own
+        # markers in the server log across ~39 turns a session.
+        litellm.suppress_debug_info = True
+        logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
+        self._litellm = litellm
         self.model = model or config.LLM_MODEL
-        self.effort = effort or config.LLM_EFFORT
-        self.client = anthropic.Anthropic(timeout=config.LLM_TIMEOUT_S, max_retries=2)
+        self.effort = config.LLM_EFFORT if effort is None else effort
+        self.fallbacks = list(config.LLM_FALLBACK_MODELS)
+        self._warn_if_credentials_missing()
+        self._warn_if_proxy_misaddressed()
+
+    def _warn_if_credentials_missing(self) -> None:
+        """Say so at startup rather than on the participant's first turn."""
+        if config.LLM_API_BASE:
+            return  # a proxy carries its own credentials
+        try:
+            env = self._litellm.validate_environment(model=self.model)
+        except Exception:  # unknown model name, or an API change -- not fatal here
+            return
+        missing = env.get("missing_keys") or []
+        if missing and not env.get("keys_in_environment"):
+            log.warning(
+                "No credentials found for %r. Set %s in .env, or point "
+                "MOBI_LLM_API_BASE at a LiteLLM proxy.",
+                self.model, ", ".join(missing),
+            )
+
+    # Model prefixes that actually route to a LiteLLM proxy server. Anything
+    # else combined with an api_base goes to that vendor's own handler instead,
+    # pointed at the proxy's URL -- which is not a route the proxy serves.
+    _PROXY_PREFIXES = ("litellm_proxy/", "openai/")
+
+    def _warn_if_proxy_misaddressed(self) -> None:
+        """Catch the api_base/model mismatch here, not on a collection day."""
+        if not config.LLM_API_BASE:
+            return
+        if self.model.startswith(self._PROXY_PREFIXES):
+            return
+        vendor, _, rest = self.model.partition("/")
+        log.warning(
+            "MOBI_LLM_API_BASE is set but MOBI_LLM_MODEL is %r, which routes to the "
+            "%s handler aimed at that URL rather than to the proxy. For a LiteLLM "
+            "proxy use 'litellm_proxy/%s' -- the model name as configured on the proxy.",
+            self.model, vendor or "default", rest or self.model,
+        )
+
+    def _call_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if self.effort:
+            kwargs["reasoning_effort"] = self.effort
+        if config.LLM_API_BASE:
+            kwargs["api_base"] = config.LLM_API_BASE
+        if config.LLM_API_KEY:
+            kwargs["api_key"] = config.LLM_API_KEY
+        if self.fallbacks:
+            kwargs["fallbacks"] = self.fallbacks
+        return kwargs
 
     def complete(self, system: str, messages: list[dict[str, str]]) -> tuple[str, str | None, dict[str, Any]]:
-        response = self.client.beta.messages.create(
-            model=self.model,
-            max_tokens=config.LLM_MAX_TOKENS,
-            system=system,
-            messages=messages,
-            output_config={"effort": self.effort},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
-        )
-        usage = {
-            "input_tokens": getattr(response.usage, "input_tokens", None),
-            "output_tokens": getattr(response.usage, "output_tokens", None),
-            "model": getattr(response, "model", self.model),
-        }
-        if response.stop_reason == "refusal":
-            details = getattr(response, "stop_details", None)
-            log.error("Model refused the turn: %s", details)
-            raise LLMRefusal(f"Model declined to respond: {getattr(details, 'category', None)}")
+        # LiteLLM takes the system prompt as the first message rather than as a
+        # separate argument, and translates it per vendor from there.
+        payload = [{"role": "system", "content": system}, *messages]
+        try:
+            response = self._litellm.completion(
+                model=self.model,
+                messages=payload,
+                max_tokens=config.LLM_MAX_TOKENS,
+                timeout=config.LLM_TIMEOUT_S,
+                num_retries=2,
+                **self._call_kwargs(),
+            )
+        except Exception as exc:  # every vendor's errors arrive as LiteLLM exceptions
+            raise LLMError(f"{type(exc).__name__}: {exc}") from exc
 
-        text = "".join(b.text for b in response.content if b.type == "text").strip()
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None)
+        hidden = getattr(response, "_hidden_params", None) or {}
+        counts = getattr(response, "usage", None)
+        usage = {
+            "input_tokens": getattr(counts, "prompt_tokens", None),
+            "output_tokens": getattr(counts, "completion_tokens", None),
+            # The model that actually answered, which differs from the one asked
+            # for whenever a fallback fired.
+            "model": getattr(response, "model", None) or self.model,
+            "requested_model": self.model,
+            "vendor": hidden.get("custom_llm_provider"),
+        }
+
+        # LiteLLM normalises a safety refusal onto OpenAI's finish reason; some
+        # vendors still surface their own word for it.
+        if finish_reason in {"content_filter", "refusal"}:
+            log.error("Model refused the turn (finish_reason=%s, model=%s)", finish_reason, usage["model"])
+            raise LLMRefusal(f"Model declined to respond (finish_reason={finish_reason})")
+
+        text = (getattr(choice.message, "content", None) or "").strip()
         if not text:
-            raise LLMError(f"Empty response from model (stop_reason={response.stop_reason})")
-        return text, response.stop_reason, usage
+            raise LLMError(f"Empty response from model (finish_reason={finish_reason})")
+        return text, finish_reason, usage
 
 
 class LLMError(RuntimeError):
@@ -203,17 +290,28 @@ class LLMRefusal(LLMError):
     """The model declined to respond."""
 
 
+# Accepted for configurations written before LiteLLM was introduced.
+_PROVIDER_ALIASES = {"anthropic": "litellm", "real": "litellm"}
+
+
 class LLMClient:
     """Provider-agnostic entry point used by the session flow."""
 
     def __init__(self, provider: str | None = None) -> None:
-        self.provider_name = (provider or config.LLM_PROVIDER).lower()
-        self.model = config.LLM_MODEL if self.provider_name == "anthropic" else "fake"
+        name = (provider or config.LLM_PROVIDER).strip().lower()
+        name = _PROVIDER_ALIASES.get(name, name)
+        if name not in {"litellm", "fake"}:
+            raise ValueError(f"Unknown LLM provider {name!r}; expected 'litellm' or 'fake'")
+        self.provider_name = name
+        self.model = "fake" if name == "fake" else config.LLM_MODEL
+        # Built once, up front: importing LiteLLM takes seconds, and that cost
+        # must not land inside a participant's first measured wait.
+        self._live = LiteLLMProvider() if name == "litellm" else None
 
     def _provider_for(self, block: BlockPlan) -> Provider:
-        if self.provider_name == "fake":
-            return FakeProvider(stance_label=block.stance.label, delay_s=config.FAKE_LLM_DELAY_S)
-        return AnthropicProvider()
+        if self._live is not None:
+            return self._live
+        return FakeProvider(stance_label=block.stance.label, delay_s=config.FAKE_LLM_DELAY_S)
 
     def respond(
         self,

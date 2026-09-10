@@ -15,9 +15,17 @@ spec, tied to one Scenario and one hidden Stance.
 uv venv && uv pip install -e ".[dev]"
 ```
 
-Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`. For development
-without a key, set `MOBI_LLM_PROVIDER=fake` instead — a deterministic canned
-responder that exercises the entire flow offline.
+Copy `.env.example` to `.env` and set the API key for whichever vendor you are
+using — model calls go through [LiteLLM](https://docs.litellm.ai/), so the
+vendor is named in `MOBI_LLM_MODEL` (`anthropic/claude-opus-5`, `openai/gpt-5`,
+`gemini/gemini-2.5-pro`, `ollama/llama3.3`, …) and the credential is that
+vendor's own variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …). For
+development without a key, set `MOBI_LLM_PROVIDER=fake` instead — a
+deterministic canned responder that exercises the entire flow offline.
+
+Changing model means changing `MOBI_LLM_MODEL` and nothing else; the model each
+session ran against is written into its `sessions` row, so a switch mid-study is
+visible in the data rather than silent.
 
 ```bash
 .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8420
@@ -26,11 +34,14 @@ responder that exercises the entire flow offline.
 Open `http://127.0.0.1:8420` and enter a Participant ID (`TEST001` or
 `TEST002` in the bundled fixtures).
 
-Before a collection day, confirm the real API path end to end:
+Before a collection day, confirm the real model path end to end:
 
 ```bash
 .venv/bin/python scripts/check_llm.py --repeat 5
 ```
+
+Add `--model openai/gpt-5` to try a different model without touching `.env` —
+useful when comparing latency across candidates.
 
 That prints the actual reply, its word count, and the latency spread the
 participant would wait — worth checking against the 7 s threshold at which the
@@ -42,7 +53,7 @@ thinking indicator changes text.
 |---|---|
 | `app/content.py` | Loads `assignment.csv` and the three key files; resolves one participant into a practice block plus 12 blocks. |
 | `app/session.py` | The per-block state machine (Section 5). Owns block index and step position. |
-| `app/llm.py` | Stance system prompts, block-local context, the 50-word cap, and the two providers. |
+| `app/llm.py` | Stance system prompts, block-local context, the 50-word cap, and the two providers (LiteLLM and a fake). |
 | `app/store.py` | SQLite persistence and CSV/JSON export. |
 | `app/markers.py` | LSL marker emission with a JSONL mirror. |
 | `app/prompts.py` | All participant-facing copy, in one place. |
@@ -275,9 +286,11 @@ environment variables take precedence over it.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `MOBI_LLM_PROVIDER` | `anthropic` | `fake` for development with no key. |
-| `MOBI_LLM_MODEL` | `claude-opus-5` | |
-| `MOBI_LLM_EFFORT` | `low` | Lower effort means lower and steadier latency. |
+| `MOBI_LLM_PROVIDER` | `litellm` | `fake` for development with no key. `anthropic` is accepted as an old name for `litellm`. |
+| `MOBI_LLM_MODEL` | `anthropic/claude-opus-5` | Any LiteLLM model id, `vendor/model`. |
+| `MOBI_LLM_EFFORT` | `low` | Reasoning effort. Lower effort means lower and steadier latency. Sent only to vendors that accept it; empty to omit. |
+| `MOBI_LLM_FALLBACK_MODELS` | unset | Comma-separated models tried in order if the primary fails. |
+| `MOBI_LLM_API_BASE` / `_API_KEY` | unset | Route everything through a LiteLLM proxy instead of calling vendors directly. Requires a `litellm_proxy/…` model id — see below. |
 | `MOBI_FIXTURES_DIR` | `test-fixtures` | Point at the real battery when it exists. |
 | `MOBI_DATA_DIR` | `data` | |
 | `MOBI_FAKE_LLM_DELAY_S` | `0` | Artificial delay for rehearsing the thinking indicator. |
@@ -285,6 +298,23 @@ environment variables take precedence over it.
 | `MOBI_SCREEN_DIAGONAL_IN` | `27.0` | Display rig — drives all visual-angle sizing. |
 | `MOBI_SCREEN_W_PX` / `_H_PX` | `2560` / `1440` | Monitor **native** resolution. |
 | `MOBI_VIEWING_DISTANCE_MM` | `600` | Participant eye-to-screen distance. Measure it. |
+
+### Going through a LiteLLM proxy
+
+If the lab runs a LiteLLM gateway, the vendor keys stay on the proxy and the
+machine holds only a virtual key. That takes three settings together, not two:
+
+```
+MOBI_LLM_API_BASE=https://litellm.your-org.example
+MOBI_LLM_API_KEY=sk-...
+MOBI_LLM_MODEL=litellm_proxy/claude-opus-5
+```
+
+The `litellm_proxy/` prefix is what routes the call to the gateway, and the name
+after it is the model **as configured on the proxy** — not the vendor's own id.
+Set `MOBI_LLM_API_BASE` with, say, `anthropic/claude-opus-5` instead and LiteLLM
+sends Anthropic-shaped requests to the proxy's URL, which is not a route it
+serves; the app logs a warning at startup when it sees that combination.
 
 Protocol constants — the 15-word minimum, the 50-word cap, the 0–100 range,
 the 7 s thinking threshold, and the 500 ms fixation-cross hold — are named at

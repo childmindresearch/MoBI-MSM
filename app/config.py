@@ -133,9 +133,34 @@ DATA_DIR = _path_env("MOBI_DATA_DIR", "data")
 DB_PATH = DATA_DIR / "sessions.db"
 MARKER_LOG_DIR = DATA_DIR / "markers"
 
-LLM_PROVIDER = os.environ.get("MOBI_LLM_PROVIDER", "anthropic").strip().lower()
-LLM_MODEL = os.environ.get("MOBI_LLM_MODEL", "claude-opus-5").strip()
+LLM_PROVIDER = os.environ.get("MOBI_LLM_PROVIDER", "litellm").strip().lower()
+"""``litellm`` for real runs, ``fake`` for development. ``anthropic`` is still
+accepted as a name for the real path, from before LiteLLM was introduced."""
+
+LLM_MODEL = os.environ.get("MOBI_LLM_MODEL", "anthropic/claude-opus-5").strip()
+"""A LiteLLM model identifier, normally ``vendor/model`` -- for example
+``anthropic/claude-opus-5``, ``openai/gpt-5``, ``gemini/gemini-2.5-pro``, or
+``ollama/llama3.3`` for a locally hosted model. Which model a session ran
+against is recorded per session, so switching this mid-study is visible in the
+data rather than silent."""
+
+LLM_FALLBACK_MODELS = [
+    m.strip() for m in os.environ.get("MOBI_LLM_FALLBACK_MODELS", "").split(",") if m.strip()
+]
+"""Optional comma-separated models tried in order if the primary one fails, so
+a vendor outage degrades to another model rather than stalling a trial. Leave
+unset for a study that must not silently change models mid-session."""
+
 LLM_EFFORT = os.environ.get("MOBI_LLM_EFFORT", "low").strip().lower()
+"""Reasoning effort, passed through to whichever vendors support it and dropped
+for those that do not. Empty means "do not send it at all"."""
+
+LLM_API_BASE = os.environ.get("MOBI_LLM_API_BASE", "").strip()
+LLM_API_KEY = os.environ.get("MOBI_LLM_API_KEY", "").strip()
+"""Set both to route every call through a LiteLLM proxy server instead of
+calling a vendor directly. Left empty, LiteLLM reads each vendor's own
+credential from the environment (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...)."""
+
 LLM_MAX_TOKENS = int(os.environ.get("MOBI_LLM_MAX_TOKENS", "4000"))
 LLM_TIMEOUT_S = float(os.environ.get("MOBI_LLM_TIMEOUT_S", "60"))
 FAKE_LLM_DELAY_S = float(os.environ.get("MOBI_FAKE_LLM_DELAY_S", "0"))

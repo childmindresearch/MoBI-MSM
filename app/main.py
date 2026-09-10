@@ -68,12 +68,16 @@ def _startup() -> None:
     global library
     library = ContentLibrary()
     get_store()
+    # Built here rather than on first use: LiteLLM is slow to import, and that
+    # cost would otherwise land inside the first participant's measured wait.
+    # It also surfaces a bad provider or missing credentials now, not mid-run.
+    client = get_client()
     stream = get_stream()
     stream.push(
         "app_started",
         app_version=APP_VERSION,
-        llm_provider=config.LLM_PROVIDER,
-        llm_model=config.LLM_MODEL,
+        llm_provider=client.provider_name,
+        llm_model=client.model,
         lsl=lsl_available(),
         participants=len(library.participant_ids()),
     )
@@ -81,7 +85,7 @@ def _startup() -> None:
         "Loaded %d participants, %d scenarios. LSL outlet: %s. LLM provider: %s (%s)",
         len(library.participant_ids()), len(library.scenarios),
         "yes" if lsl_available() else "NO - JSONL only",
-        config.LLM_PROVIDER, config.LLM_MODEL,
+        client.provider_name, client.model,
     )
     log.info(
         "Display rig: %.1f\" %dx%d at %.0f mm -> %.2f px/deg (pitch %.4f mm/px)",
@@ -186,7 +190,7 @@ def get_config() -> dict[str, Any]:
         },
         "total_blocks": config.REAL_BLOCK_COUNT,
         "lsl_available": lsl_available(),
-        "llm_provider": config.LLM_PROVIDER,
+        "llm_provider": get_client().provider_name,
         "ui_font_family": config.UI_FONT_FAMILY,
         "ui_font_file": config.UI_FONT_FILE,
         "ui_font_installed": font_installed(),
@@ -258,12 +262,13 @@ def start_session(req: ParticipantRequest) -> dict[str, Any]:
     except ContentError as exc:
         raise HTTPException(422, str(exc)) from exc
 
-    session = Session(plan, get_client())
+    client = get_client()
+    session = Session(plan, client)
     sessions[session.session_id] = session
 
     store.create_session(
         session.session_id, pid, session.started_at,
-        app_version=APP_VERSION, llm_model=config.LLM_MODEL, llm_provider=config.LLM_PROVIDER,
+        app_version=APP_VERSION, llm_model=client.model, llm_provider=client.provider_name,
     )
     _mark(session, "session_started", block_count=len(plan.blocks),
           ui_font=config.UI_FONT_FAMILY if font_installed() else "SYSTEM-FALLBACK",
