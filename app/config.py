@@ -155,9 +155,17 @@ LLM_FALLBACK_MODELS = [
 a vendor outage degrades to another model rather than stalling a trial. Leave
 unset for a study that must not silently change models mid-session."""
 
-LLM_EFFORT = os.environ.get("MOBI_LLM_EFFORT", "low").strip().lower()
+LLM_EFFORT = os.environ.get("MOBI_LLM_EFFORT", "").strip().lower()
 """Reasoning effort, passed through to whichever vendors support it and dropped
-for those that do not. Empty means "do not send it at all"."""
+for those that do not. Empty -- the default -- means "do not send it at all".
+
+Deliberately unset rather than "low". LiteLLM maps this onto extended thinking,
+which is a heavier mechanism than the output_config effort it replaced: measured
+on one gateway it moved mean latency from ~2.5 s to ~6.7 s (max 8.2 s), which
+straddles THINKING_SLOW_AFTER_MS. A threshold sitting inside the latency spread
+means the thinking indicator changes state on some trials and not others, which
+is a visual difference across blocks that the experiment did not ask for. Set
+this only deliberately, and move that threshold clear of the spread if you do."""
 
 LLM_API_BASE = os.environ.get("MOBI_LLM_API_BASE", "").strip()
 LLM_API_KEY = os.environ.get("MOBI_LLM_API_KEY", "").strip()

@@ -318,7 +318,7 @@ environment variables take precedence over it.
 |---|---|---|
 | `MOBI_LLM_PROVIDER` | `litellm` | `fake` for development with no key. `anthropic` is accepted as an old name for `litellm`. |
 | `MOBI_LLM_MODEL` | `anthropic/claude-opus-5` | Any LiteLLM model id, `vendor/model`. |
-| `MOBI_LLM_EFFORT` | `low` | Reasoning effort. Lower effort means lower and steadier latency. Sent only to vendors that accept it; empty to omit. |
+| `MOBI_LLM_EFFORT` | unset | Reasoning effort, sent only to vendors that accept it. Unset by default — LiteLLM maps it to extended thinking, which *raises* latency; see below. |
 | `MOBI_LLM_FALLBACK_MODELS` | unset | Comma-separated models tried in order if the primary fails. |
 | `MOBI_LLM_API_BASE` / `_API_KEY` | unset | Route everything through a LiteLLM proxy instead of calling vendors directly. Requires a `litellm_proxy/…` model id — see below. |
 | `MOBI_FIXTURES_DIR` | `test-fixtures` | Point at the real battery when it exists. |
@@ -328,6 +328,26 @@ environment variables take precedence over it.
 | `MOBI_SCREEN_DIAGONAL_IN` | `27.0` | Display rig — drives all visual-angle sizing. |
 | `MOBI_SCREEN_W_PX` / `_H_PX` | `2560` / `1440` | Monitor **native** resolution. |
 | `MOBI_VIEWING_DISTANCE_MM` | `600` | Participant eye-to-screen distance. Measure it. |
+
+### Reasoning effort and the thinking indicator
+
+`MOBI_LLM_EFFORT` is unset by default, deliberately. LiteLLM maps it onto
+extended thinking — a heavier mechanism than the `output_config` effort it
+replaced — so setting it makes replies *slower*, not faster. Measured against
+one gateway:
+
+| `MOBI_LLM_EFFORT` | min | max | mean |
+|---|---|---|---|
+| `low` | 5.1 s | 8.2 s | 6.7 s |
+| unset | 2.4 s | 5.9 s | 3.7 s |
+
+That matters because `THINKING_SLOW_AFTER_MS` is 7 s. With effort set, the
+threshold sits inside the latency spread, so the thinking indicator changes
+text on some trials and not others — a visual difference across blocks that
+the experiment did not ask for. Unset, every trial stays on one side of it.
+
+Re-measure with `scripts/check_llm.py --repeat 5` when changing model or
+gateway; the margin is not large.
 
 ### Going through a LiteLLM proxy
 
