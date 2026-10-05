@@ -69,13 +69,13 @@
   --accent: #3d5a80;
   --accent-ink: #ffffff;
   --user-bubble: #e7eaf0;
-  --scenario-bg: #fdfcfa;
+  --vignette-bg: #fdfcfa;
   --error: #a4342b;
   --ok: #2f6b4f;
 
   /* --- Type scale, in degrees --- */
   --font-body: calc(var(--deg) * 0.778);       /* primary reading size */
-  --font-scenario: calc(var(--deg) * 0.833);   /* the main stimulus text */
+  --font-vignette: calc(var(--deg) * 0.833);   /* the main stimulus text */
   --font-title: calc(var(--deg) * 1.556);
   --font-lede: calc(var(--deg) * 0.833);
   --font-answer: calc(var(--deg) * 1.111);     /* participant numeric answers */
@@ -282,39 +282,39 @@ button:not(:disabled):hover { filter: brightness(1.08); }
   line-height: 1.2;
 }
 
-/* Scenario card: scenario text, its question, and the question's scale anchors.
+/* Vignette card: vignette text, its appraisal, and the appraisal scale anchors.
    The primary reading stimulus, so it takes the full column and the largest
    body size in the interface. */
 
-.msg-scenario {
+.msg-vignette {
   align-self: stretch;
-  background: var(--scenario-bg);
+  background: var(--vignette-bg);
   border: 1px solid var(--line);
   border-left: 5px solid var(--accent);
   border-radius: var(--radius);
   padding: var(--pad-card-y) var(--pad-card-x);
 }
 
-.scenario-text {
+.vignette-text {
   white-space: pre-wrap;
   margin: 0;
-  font-size: var(--font-scenario);
+  font-size: var(--font-vignette);
   line-height: 1.62;
   max-width: var(--measure);
 }
 
-.scenario-question {
+.vignette-appraisal {
   margin: calc(var(--deg) * 0.944) 0 0;
   padding-top: calc(var(--deg) * 0.833);
   border-top: 1px solid var(--line);
-  font-size: var(--font-scenario);
+  font-size: var(--font-vignette);
   line-height: 1.62;
   font-weight: 600;
   white-space: pre-wrap;
   max-width: var(--measure);
 }
 
-.scenario-scale {
+.vignette-scale {
   display: flex;
   justify-content: space-between;
   gap: calc(var(--deg) * 1.333);
@@ -323,7 +323,7 @@ button:not(:disabled):hover { filter: brightness(1.08); }
   color: var(--ink-faint);
 }
 
-.scenario-scale b { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.vignette-scale b { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
 
 /* Inter-block gate: a chat-native inline element, not an interstitial screen */
 

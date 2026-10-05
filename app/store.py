@@ -28,14 +28,16 @@ log = logging.getLogger(__name__)
 
 # Per-block value columns, in the order the participant produces them.
 BLOCK_VALUE_COLUMNS: tuple[str, ...] = (
-    "scenario_shown_at",
+    "vignette_shown_at",
     "answer_score_1", "answer_score_1_at",
     "confidence_score_1", "confidence_score_1_at",
     "user_text_1", "user_text_1_words", "user_text_1_at",
-    "llm_text_1", "llm_text_1_raw", "llm_text_1_truncated", "llm_text_1_elicited",
+    "llm_text_1", "llm_text_1_raw", "llm_text_1_drafts",
+    "llm_text_1_rewrites", "llm_text_1_over_cap", "llm_text_1_elicited",
     "llm_text_1_requested_at", "llm_text_1_received_at", "llm_text_1_latency_ms",
     "user_text_2", "user_text_2_words", "user_text_2_at",
-    "llm_text_2", "llm_text_2_raw", "llm_text_2_truncated", "llm_text_2_elicited",
+    "llm_text_2", "llm_text_2_raw", "llm_text_2_drafts",
+    "llm_text_2_rewrites", "llm_text_2_over_cap", "llm_text_2_elicited",
     "llm_text_2_requested_at", "llm_text_2_received_at", "llm_text_2_latency_ms",
     "user_text_3", "user_text_3_words", "user_text_3_at",
     "answer_score_2", "answer_score_2_at",
@@ -47,9 +49,9 @@ BLOCK_VALUE_COLUMNS: tuple[str, ...] = (
 BLOCK_META_COLUMNS: tuple[str, ...] = (
     "session_id", "participant_id", "block_index", "is_practice",
     "category_label", "category_name",
-    "scenario_label", "scenario_text", "question_text",
-    "scale_low_label", "scale_high_label",
+    "vignette_label", "vignette_text", "appraisal_text",
     "stance_label", "stance_name",
+    "ends_with_question", "prompt_version",
 )
 
 _SCHEMA = f"""

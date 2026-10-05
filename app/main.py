@@ -47,7 +47,7 @@ CLIENT_EVENTS = frozenset({
     "visibility_changed",
     "presentation_mode_checked",
     "thinking_shown",
-    "thinking_slow_state",
+    "thinking_hidden",
     "input_focused",
     "validation_blocked",
     "start_screen_shown",
@@ -82,8 +82,8 @@ def _startup() -> None:
         participants=len(library.participant_ids()),
     )
     log.info(
-        "Loaded %d participants, %d scenarios. LSL outlet: %s. LLM provider: %s (%s)",
-        len(library.participant_ids()), len(library.scenarios),
+        "Loaded %d participants, %d vignettes. LSL outlet: %s. LLM provider: %s (%s)",
+        len(library.participant_ids()), len(library.vignettes),
         "yes" if lsl_available() else "NO - JSONL only",
         client.provider_name, client.model,
     )
@@ -173,9 +173,10 @@ def get_config() -> dict[str, Any]:
     return {
         "app_version": APP_VERSION,
         "min_response_words": config.MIN_RESPONSE_WORDS,
+        "show_word_count": config.SHOW_WORD_COUNT,
         "score_min": config.SCORE_MIN,
         "score_max": config.SCORE_MAX,
-        "thinking_slow_after_ms": config.THINKING_SLOW_AFTER_MS,
+        "llm_thinking_hold_ms": config.LLM_THINKING_HOLD_MS,
         "fixation_cross_ms": config.FIXATION_CROSS_MS,
         "fixation_cross_tolerance_ms": config.FIXATION_CROSS_TOLERANCE_MS,
         # Display rig: the client resolves every size from px_per_degree, and
@@ -283,12 +284,13 @@ def start_session(req: ParticipantRequest) -> dict[str, Any]:
 
     view = session.open_block()
     store.init_block(session.block_meta())
-    store.update_block(session.session_id, session.block.block_index, {"scenario_shown_at": now_iso()})
+    store.update_block(session.session_id, session.block.block_index, {"vignette_shown_at": now_iso()})
     _mark(session, "block_started",
           is_practice=session.block.is_practice,
           category=session.block.category_label,
-          scenario=session.block.scenario.label,
-          stance=session.block.stance.label)
+          vignette=session.block.vignette.label,
+          stance=session.block.stance.label,
+          ends_with_question=session.block.ends_with_question)
 
     return {"session_id": session.session_id, **view.to_dict()}
 
@@ -316,12 +318,13 @@ def submit(session_id: str, req: SubmitRequest) -> dict[str, Any]:
     # A gate advanced us into a new block: persist its metadata and opening timestamp.
     if req.step == "gate" and not view.done:
         store.init_block(session.block_meta())
-        store.update_block(session_id, session.block.block_index, {"scenario_shown_at": now_iso()})
+        store.update_block(session_id, session.block.block_index, {"vignette_shown_at": now_iso()})
         _mark(session, "block_started",
               is_practice=session.block.is_practice,
               category=session.block.category_label,
-              scenario=session.block.scenario.label,
-              stance=session.block.stance.label)
+              vignette=session.block.vignette.label,
+              stance=session.block.stance.label,
+              ends_with_question=session.block.ends_with_question)
 
     if view.done:
         _finish(session)
@@ -350,7 +353,8 @@ def llm_turn(session_id: str) -> dict[str, Any]:
 
     store.update_block(session_id, block_index, updates)
     _mark(session, "llm_response_received",
-          latency_ms=result.latency_ms, truncated=result.truncated,
+          latency_ms=result.latency_ms, rewrites=result.rewrites,
+          over_cap=result.over_cap, ends_with_question=result.ends_with_question,
           elicited=result.elicited,
           model=result.model, provider=result.provider,
           requested_at=result.requested_at, received_at=result.received_at,

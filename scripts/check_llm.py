@@ -3,16 +3,16 @@
 
 Sends a single block-shaped request through the same code the task uses --
 same LiteLLM call, same system prompt construction, same Stance, same word
-cap -- and prints the reply plus the latency the participant would have waited.
+cap and rewrite loop -- and prints the reply plus how long the model took.
 
-Each reply also has to elicit the participant's next response in its own
-closing sentence, so the check reports whether it did. A run that prints
-elicited=False is a run where the participant would have been left facing an
-empty box with nothing asking them for anything.
+Each block says whether its replies end on a question; --statement tests the
+blocks that must not. The check reports how many rewrite rounds each reply
+needed and whether any had to be delivered still non-compliant, and warns when
+the model's latency would overrun the fixed thinking hold.
 
     .venv/bin/python scripts/check_llm.py
     .venv/bin/python scripts/check_llm.py --stance counterbalancing
-    .venv/bin/python scripts/check_llm.py --turn 2
+    .venv/bin/python scripts/check_llm.py --turn 2 --statement
     .venv/bin/python scripts/check_llm.py --model openai/gpt-5 --repeat 5
 """
 
@@ -52,7 +52,9 @@ def main() -> int:
     ap.add_argument("--repeat", type=int, default=1, help="Send N requests to sample latency spread")
     ap.add_argument("--turn", type=int, default=1, choices=[1, 2],
                     help="Which LLM turn in the block to simulate. Turn 2 is the last thing the "
-                         "model says before the block moves on, and closes differently.")
+                         "model says before the block moves on, and is guided differently.")
+    ap.add_argument("--statement", action="store_true",
+                    help="Simulate a block whose replies must end on a statement, not a question")
     args = ap.parse_args()
 
     if args.model:
@@ -72,14 +74,16 @@ def main() -> int:
     lib = ContentLibrary()
     block = lib.practice
     stance = lib.stances[args.stance]
-    block = type(block)(**{**block.__dict__, "stance": stance})
+    ends_with_question = not args.statement
+    block = type(block)(**{**block.__dict__, "stance": stance, "ends_with_question": ends_with_question})
 
     print(f"provider={args.provider}  model={config.LLM_MODEL}  effort={config.LLM_EFFORT or '(unset)'}")
     if config.LLM_FALLBACK_MODELS:
         print(f"fallbacks={', '.join(config.LLM_FALLBACK_MODELS)}")
     if config.LLM_API_BASE:
         print(f"api_base={config.LLM_API_BASE}")
-    print(f"stance={stance.name}  turn={args.turn}\n")
+    print(f"stance={stance.name}  turn={args.turn}  ends_with_question={ends_with_question}  "
+          f"max_rewrites={config.MAX_REWRITES}\n")
     print("--- system prompt ---")
     print(build_system_prompt(block, args.turn))
     print("\n--- replies ---")
@@ -98,7 +102,7 @@ def main() -> int:
 
     client = LLMClient(args.provider)
     latencies = []
-    elicited = 0
+    over_cap = 0
     for i in range(args.repeat):
         result = client.respond(
             block,
@@ -108,20 +112,27 @@ def main() -> int:
             turn_number=args.turn,
         )
         latencies.append(result.latency_ms)
-        elicited += result.elicited
+        over_cap += result.over_cap
         print(f"[{i + 1}] {result.latency_ms} ms | {len(result.text.split())} words | "
-              f"truncated={result.truncated} | elicited={result.elicited}")
+              f"rewrites={result.rewrites} | over_cap={result.over_cap} | elicited={result.elicited}")
+        for n, draft in enumerate(result.drafts, 1):
+            if draft != result.text:
+                print(f"    draft {n} ({len(draft.split())} words, rejected): {draft}")
         print(f"    {result.text}\n")
 
     if len(latencies) > 1:
         print(f"latency: min={min(latencies)}ms  max={max(latencies)}ms  "
               f"mean={sum(latencies) // len(latencies)}ms")
-    if elicited < args.repeat:
-        print(f"WARNING: {args.repeat - elicited} of {args.repeat} replies did not close on a "
-              f"question. The participant sees no prompt other than the reply itself, so those "
-              f"turns would have left them with an unlabelled input box.")
-    print(f"\nThinking indicator switches to its 'still thinking' state after "
-          f"{config.THINKING_SLOW_AFTER_MS} ms.")
+    if over_cap:
+        print(f"WARNING: {over_cap} of {args.repeat} replies still broke the word cap or the "
+              f"question rule after {config.MAX_REWRITES} rewrites and would have been "
+              f"delivered as is.")
+    overran = [ms for ms in latencies if ms > config.LLM_THINKING_HOLD_MS]
+    print(f"\nEvery reply is held behind the thinking indicator for a fixed "
+          f"{config.LLM_THINKING_HOLD_MS} ms.")
+    if overran:
+        print(f"WARNING: {len(overran)} of {len(latencies)} replies took longer than that, so "
+              f"those trials would show a longer wait than the others.")
     return 0
 
 

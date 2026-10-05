@@ -9,6 +9,7 @@ forward-only flow cannot be skipped or replayed from it.
 from __future__ import annotations
 
 import itertools
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,17 +17,17 @@ from typing import Any, Literal
 
 from . import config, prompts
 from .content import BlockPlan, ParticipantPlan
-from .llm import LLMClient, LLMResult, Turn
+from .llm import PROMPT_VERSION, LLMClient, LLMResult, Turn
 
 StepName = Literal[
-    "scenario", "answer_1", "confidence_1", "text_1", "llm_1",
+    "vignette", "answer_1", "confidence_1", "text_1", "llm_1",
     "text_2", "llm_2", "text_3", "answer_2", "confidence_2",
     "activation", "gate", "done",
 ]
 
 # The order the participant moves through within every block, practice included.
 STEP_ORDER: tuple[StepName, ...] = (
-    "scenario", "answer_1", "confidence_1", "text_1", "llm_1",
+    "vignette", "answer_1", "confidence_1", "text_1", "llm_1",
     "text_2", "llm_2", "text_3", "answer_2", "confidence_2",
     "activation", "gate",
 )
@@ -65,12 +66,18 @@ def word_count(text: str) -> int:
     return len(text.split())
 
 
+def min_words_message(words: int) -> str:
+    if config.MIN_RESPONSE_WORDS <= 1:
+        return "Please type a response."
+    return f"Please write at least {config.MIN_RESPONSE_WORDS} words ({words} so far)."
+
+
 @dataclass
 class Message:
     """One rendered chat message."""
 
     id: str
-    kind: Literal["scenario", "prompt", "llm", "gate", "notice", "answer", "interstitial"]
+    kind: Literal["vignette", "prompt", "llm", "gate", "notice", "answer", "interstitial"]
     text: str
     scale_low: str | None = None
     scale_high: str | None = None
@@ -114,7 +121,7 @@ class StepView:
     reset_transcript: bool = False
     """Set only on the view that opens a block. Blocks are self-contained: the
     browser clears the transcript here, so a participant can never scroll back
-    into a previous block's scenario or exchange."""
+    into a previous block's vignette or exchange."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,7 +147,7 @@ class Session:
         self.started_at = now_iso()
         self.completed_at: str | None = None
         self._block_pos = 0                      # index into plan.blocks
-        self._step: StepName = "scenario"
+        self._step: StepName = "vignette"
         self._values: dict[str, Any] = {}        # values for the current block
         self._turns: list[Turn] = []             # current block's LLM conversation
         self._msg_ids = itertools.count(1)
@@ -204,9 +211,9 @@ class Session:
     # --- rendering ---
 
     def open_block(self) -> StepView:
-        """Render the Scenario and Question together, then ask for Answer Score 1
-        (Section 5, steps 1-3)."""
-        if self._step != "scenario":
+        """Render the vignette and its appraisal together, then ask for Answer
+        Score 1 (Section 5, steps 1-3)."""
+        if self._step != "vignette":
             raise FlowError(f"open_block called while on step {self._step!r}")
         block = self.block
         messages: list[Message] = []
@@ -219,23 +226,25 @@ class Session:
         messages.append(
             Message(
                 self._next_id(),
-                "scenario",
-                block.scenario.text,
-                question=block.scenario.question_text,
-                scale_low=block.scenario.scale_low_label,
-                scale_high=block.scenario.scale_high_label,
+                "vignette",
+                block.vignette.text,
+                question=self._appraisal(),
+                scale_low=prompts.APPRAISAL_SCALE_LOW,
+                scale_high=prompts.APPRAISAL_SCALE_HIGH,
             )
         )
         self._step = "answer_1"
         messages.append(Message(self._next_id(), "prompt", prompts.ANSWER_1))
         return self._view(messages, self._input_spec(), reset_transcript=True)
 
+    def _appraisal(self) -> str:
+        return prompts.APPRAISAL.format(appraisal_text=self.block.vignette.appraisal_text)
+
     def _input_spec(self) -> InputSpec | None:
         step = self._step
-        scenario = self.block.scenario
         if step in NUMERIC_STEPS:
             if step in ("answer_1", "answer_2"):
-                low, high = scenario.scale_low_label, scenario.scale_high_label
+                low, high = prompts.APPRAISAL_SCALE_LOW, prompts.APPRAISAL_SCALE_HIGH
             elif step in ("confidence_1", "confidence_2"):
                 low, high = prompts.CONFIDENCE_SCALE_LOW, prompts.CONFIDENCE_SCALE_HIGH
             else:
@@ -262,11 +271,11 @@ class Session:
             return prompts.CONFIDENCE_1
         if step == "text_1":
             return prompts.TEXT_1.format(answer_score_1=self._values["answer_score_1"])
-        # text_2 and text_3 deliberately have no prompt copy: the LLM reply
-        # that precedes them asks for the response itself, so the participant
-        # sees one message rather than a reply followed by a fixed question.
+        # text_2 and text_3 deliberately have no prompt copy: the input box
+        # follows the LLM reply directly, whether or not that reply ends on a
+        # question, and its placeholder marks it as the participant's turn.
         if step == "answer_2":
-            return prompts.ANSWER_2.format(question_text=self.block.scenario.question_text)
+            return prompts.ANSWER_2.format(appraisal=self._appraisal())
         if step == "confidence_2":
             return prompts.CONFIDENCE_2
         if step == "activation":
@@ -298,10 +307,7 @@ class Session:
             text = str(raw).strip()
             words = word_count(text)
             if words < config.MIN_RESPONSE_WORDS:
-                raise ValidationError(
-                    f"Please write at least {config.MIN_RESPONSE_WORDS} words "
-                    f"({words} so far)."
-                )
+                raise ValidationError(min_words_message(words))
             return text
 
         if step == "gate":
@@ -364,7 +370,7 @@ class Session:
         self._block_pos += 1
         self._values = {}
         self._turns = []
-        self._step = "scenario"
+        self._step = "vignette"
         return self.open_block()
 
     # --- LLM turns ---
@@ -387,16 +393,18 @@ class Session:
         updates = {
             f"llm_text_{which}": result.text,
             f"llm_text_{which}_raw": result.raw_text,
-            f"llm_text_{which}_truncated": result.truncated,
+            f"llm_text_{which}_drafts": json.dumps(result.drafts),
+            f"llm_text_{which}_rewrites": result.rewrites,
+            f"llm_text_{which}_over_cap": result.over_cap,
             f"llm_text_{which}_elicited": result.elicited,
             f"llm_text_{which}_requested_at": result.requested_at,
             f"llm_text_{which}_received_at": result.received_at,
             f"llm_text_{which}_latency_ms": result.latency_ms,
         }
 
-        # The reply is the only message shown: it responds to the participant
-        # and asks for their next response in the same breath, so no separate
-        # standardized prompt follows it.
+        # The reply is the only message shown: no standardized prompt follows
+        # it. In question blocks it asks for the next response itself; in the
+        # others the input box and its placeholder do.
         message = Message(self._next_id(), "llm", result.text)
         next_step: StepName = "text_2" if which == 1 else "text_3"
         self._step = next_step
@@ -414,11 +422,11 @@ class Session:
             "is_practice": block.is_practice,
             "category_label": block.category_label,
             "category_name": block.category_name,
-            "scenario_label": block.scenario.label,
-            "scenario_text": block.scenario.text,
-            "question_text": block.scenario.question_text,
-            "scale_low_label": block.scenario.scale_low_label,
-            "scale_high_label": block.scenario.scale_high_label,
+            "vignette_label": block.vignette.label,
+            "vignette_text": block.vignette.text,
+            "appraisal_text": block.vignette.appraisal_text,
             "stance_label": block.stance.label,
             "stance_name": block.stance.name,
+            "ends_with_question": block.ends_with_question,
+            "prompt_version": PROMPT_VERSION,
         }

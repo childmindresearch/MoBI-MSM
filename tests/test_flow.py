@@ -76,12 +76,31 @@ def test_numeric_validation(client):
 
 
 def test_text_minimum_words(client):
+    """The minimum is one word: only an empty response is blocked."""
+    assert config.MIN_RESPONSE_WORDS == 1
+    sid = client.post("/api/session", json={"participant_id": "TEST002"}).json()["session_id"]
+    client.post(f"/api/session/{sid}/submit", json={"step": "answer_1", "value": 40})
+    client.post(f"/api/session/{sid}/submit", json={"step": "confidence_1", "value": 60})
+    r = client.post(f"/api/session/{sid}/submit", json={"step": "text_1", "value": "   "})
+    assert r.status_code == 422 and r.json()["detail"] == "Please type a response."
+    assert client.post(f"/api/session/{sid}/submit", json={"step": "text_1", "value": "Yes"}).status_code == 200
+
+
+def test_text_minimum_is_still_enforced_when_raised(client, monkeypatch):
+    """The word floor is switched down, not removed: raising it brings it back."""
+    monkeypatch.setattr(config, "MIN_RESPONSE_WORDS", 15)
     sid = client.post("/api/session", json={"participant_id": "TEST002"}).json()["session_id"]
     client.post(f"/api/session/{sid}/submit", json={"step": "answer_1", "value": 40})
     client.post(f"/api/session/{sid}/submit", json={"step": "confidence_1", "value": 60})
     r = client.post(f"/api/session/{sid}/submit", json={"step": "text_1", "value": "too short"})
     assert r.status_code == 422 and "15 words" in r.json()["detail"]
     assert client.post(f"/api/session/{sid}/submit", json={"step": "text_1", "value": WORDS}).status_code == 200
+
+
+def test_word_count_indicator_hidden(client):
+    cfg = client.get("/api/config").json()
+    assert cfg["show_word_count"] is False
+    assert cfg["min_response_words"] == 1
 
 
 def test_out_of_order_submission_rejected(client):
@@ -137,7 +156,14 @@ def test_data_is_persisted_per_block(client):
     assert row["user_text_1_words"] == str(len(WORDS.split()))
     assert row["llm_text_1"]
     assert int(row["llm_text_1_latency_ms"]) >= 0
+    assert row["llm_text_1_rewrites"] == "0"
+    assert row["llm_text_1_over_cap"] == "0"
+    assert json.loads(row["llm_text_1_drafts"]) == [row["llm_text_1"]]
     assert row["stance_label"] == "calibrated"  # practice block is always Calibrated
+    assert row["vignette_label"] == "PRACTICE"
+    assert row["appraisal_text"]
+    assert row["ends_with_question"] == "1"
+    assert row["prompt_version"]
 
 
 def test_blocks_are_self_contained(client):
@@ -340,15 +366,25 @@ def test_session_records_rig_for_analysis(client):
     assert payload["px_per_degree"] == pytest.approx(44.85, abs=0.1)
 
 
-def test_llm_reply_elicits_the_next_response_itself(client):
-    """The reply is the only message shown before User Text Response 2 and 3.
+def _to_block(client, sid, view, block_index):
+    """Advance through whole blocks until `block_index` has just opened."""
+    while view["block_index"] != block_index:
+        view = _run_block(client, sid, view)
+    return view
 
-    The follow-up used to arrive as a second, standardized message ("What do you
-    make of that response?"). It is now the model's job to ask, inside its own
-    reply, so anything that reintroduces a separate prompt message here would
-    put two questions in front of the participant at once.
+
+@pytest.mark.parametrize("block_index, ends_with_question", [(1, True), (2, False)])
+def test_llm_reply_follows_the_blocks_question_flag(client, block_index, ends_with_question):
+    """The reply is the only message shown before User Text Response 2 and 3,
+    and whether it ends on a question is the block's question_N flag.
+
+    TEST001 block 1 is a question block and block 2 a statement block.
     """
-    sid = client.post("/api/session", json={"participant_id": "TEST001"}).json()["session_id"]
+    from app.store import get_store
+
+    view = client.post("/api/session", json={"participant_id": "TEST001"}).json()
+    sid = view["session_id"]
+    view = _to_block(client, sid, view, block_index)
     client.post(f"/api/session/{sid}/submit", json={"step": "answer_1", "value": 40})
     client.post(f"/api/session/{sid}/submit", json={"step": "confidence_1", "value": 60})
 
@@ -359,12 +395,19 @@ def test_llm_reply_elicits_the_next_response_itself(client):
         view = client.post(f"/api/session/{sid}/llm").json()
         kinds = [m["kind"] for m in view["messages"]]
         assert kinds == ["llm"], f"expected the reply alone, got {kinds}"
-        assert view["messages"][0]["text"].rstrip().endswith("?")
+        text = view["messages"][0]["text"]
+        if ends_with_question:
+            assert text.rstrip().endswith("?")
+        else:
+            assert "?" not in text
 
-        # The box still says what it wants, in case a reply ever fails to ask.
+        # The box says what it wants either way.
         assert view["input"]["step"] == next_step
         assert view["input"]["placeholder"]
-        assert view["input"]["min_words"] == config.MIN_RESPONSE_WORDS
+
+    row = [dict(r) for r in get_store().block_rows(sid) if r["block_index"] == str(block_index)][0]
+    assert row["ends_with_question"] == ("1" if ends_with_question else "0")
+    assert row["llm_text_1_elicited"] == row["ends_with_question"]
 
 
 def test_elicitation_is_recorded_per_turn(client):
@@ -392,3 +435,121 @@ def test_reply_word_cap_matches_config(client):
     view = client.post(f"/api/session/{sid}/llm").json()
 
     assert len(view["messages"][0]["text"].split()) <= config.MAX_LLM_WORDS
+
+
+def test_vignette_card_shows_the_appraisal_on_the_agreement_scale(client):
+    from app import prompts
+
+    view = client.post("/api/session", json={"participant_id": "TEST001"}).json()
+    card = [m for m in view["messages"] if m["kind"] == "vignette"][0]
+    assert "consistent morning routine" in card["text"]
+    assert card["question"] == "\u201cA consistent morning routine makes people more productive for the rest of the day.\u201d"
+    assert view["messages"][-1]["text"] == prompts.ANSWER_1
+    assert (card["scale_low"], card["scale_high"]) == (prompts.APPRAISAL_SCALE_LOW, prompts.APPRAISAL_SCALE_HIGH)
+    assert (view["input"]["scale_low"], view["input"]["scale_high"]) == ("Do not agree at all", "Completely agree")
+
+
+def test_assignment_rejects_a_vignette_from_the_wrong_category(tmp_path):
+    import shutil
+
+    from app.content import ContentError, ContentLibrary
+
+    for f in (config.FIXTURES_DIR).glob("*.csv"):
+        shutil.copy(f, tmp_path / f.name)
+    path = tmp_path / "assignment.csv"
+    path.write_text(path.read_text().replace("TEST001,INF,INF-01", "TEST001,INF,DEC-09", 1))
+    with pytest.raises(ContentError, match="DEC-09"):
+        ContentLibrary(tmp_path).resolve("TEST001")
+
+
+def test_fixture_question_flags_are_balanced_within_each_stance():
+    """Half of each stance's blocks end on a question, half do not."""
+    from collections import Counter
+
+    from app.content import ContentLibrary
+
+    lib = ContentLibrary()
+    for pid in lib.participant_ids():
+        counts = Counter((b.stance.label, b.ends_with_question) for b in lib.resolve(pid).blocks[1:])
+        for stance in lib.stances:
+            assert counts[(stance, True)] == counts[(stance, False)] == 2, (pid, counts)
+
+
+class _ScriptedProvider:
+    """Returns the given drafts in order, and records what it was sent."""
+
+    name = "scripted"
+
+    def __init__(self, drafts):
+        self.drafts = list(drafts)
+        self.calls = []
+
+    def complete(self, system, messages):
+        self.calls.append(messages)
+        return self.drafts.pop(0), "end_turn", {"input_tokens": 10, "output_tokens": 5}
+
+
+def _respond(drafts, ends_with_question=True):
+    from app.content import ContentLibrary
+    from app.llm import LLMClient, Turn
+
+    client = LLMClient("fake")
+    provider = _ScriptedProvider(drafts)
+    client._provider_for = lambda block: provider
+    result = client.respond(ContentLibrary().practice, 50, 50, [Turn("user", "Because.")],
+                            ends_with_question=ends_with_question)
+    return result, provider
+
+
+def test_over_long_reply_is_rewritten_by_the_model_not_cut():
+    from app.llm import PROBLEM_TOO_LONG
+
+    long = " ".join(["word"] * (config.MAX_LLM_WORDS + 10)) + " right?"
+    short = "A shorter reply that keeps the point. Does that fit?"
+    result, provider = _respond([long, short])
+
+    assert result.text == short
+    assert (result.rewrites, result.over_cap) == (1, False)
+    assert result.drafts == [long, short]
+    assert result.usage["input_tokens"] == 20  # both rounds counted
+    # The rewrite request carries the draft back and names the problem.
+    retry = provider.calls[1]
+    assert retry[-2] == {"role": "assistant", "content": long}
+    assert PROBLEM_TOO_LONG.format(n=config.MAX_LLM_WORDS + 11, max_words=config.MAX_LLM_WORDS) in retry[-1]["content"]
+
+
+def test_question_rule_is_enforced_both_ways():
+    from app.llm import PROBLEM_HAS_QUESTION, PROBLEM_NO_QUESTION
+
+    result, provider = _respond(["No question here.", "Now there is one?"], ends_with_question=True)
+    assert result.text == "Now there is one?" and result.rewrites == 1
+    assert PROBLEM_NO_QUESTION in provider.calls[1][-1]["content"]
+
+    result, provider = _respond(["Is this a question? It ends flat.", "It ends flat."], ends_with_question=False)
+    assert result.text == "It ends flat." and result.rewrites == 1
+    assert PROBLEM_HAS_QUESTION in provider.calls[1][-1]["content"]
+
+
+def test_still_non_compliant_after_max_rewrites_is_delivered_and_flagged():
+    drafts = [" ".join(["word"] * (config.MAX_LLM_WORDS + n)) + "?" for n in (30, 10, 20)]
+    result, provider = _respond(drafts)
+
+    assert len(provider.calls) == config.MAX_REWRITES + 1
+    assert result.over_cap is True
+    assert result.text == drafts[1]  # the shortest attempt, never cut by code
+    assert result.raw_text == drafts[0]
+
+
+def test_thinking_hold_is_a_fixed_seven_seconds(client):
+    cfg = client.get("/api/config").json()
+    assert cfg["llm_thinking_hold_ms"] == 7000
+    assert "thinking_slow_after_ms" not in cfg
+
+    sid = client.post("/api/session", json={"participant_id": "TEST002"}).json()["session_id"]
+    r = client.post(f"/api/session/{sid}/event", json={
+        "event": "thinking_hidden",
+        "detail": {"hold_ms": 7000, "actual_hold_ms": 7003, "reply_after_ms": 2400, "overran": False},
+    })
+    assert r.status_code == 200
+    r = client.post(f"/api/session/{sid}/event", json={"event": "thinking_slow_state", "detail": {}})
+    assert r.status_code == 400
