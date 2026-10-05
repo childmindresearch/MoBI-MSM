@@ -43,23 +43,43 @@ def _path_env(name: str, default: str) -> Path:
 REAL_BLOCK_COUNT = 12
 """Blocks 1-12, one per Category x Stance combination."""
 
-MIN_RESPONSE_WORDS = 15
-"""Minimum whitespace-delimited tokens for User Text Response 1-3 (Section 6)."""
+MIN_RESPONSE_WORDS = 1
+"""Minimum whitespace-delimited tokens for User Text Response 1-3 (Section 6).
+
+Was 15. At 1 it only blocks an empty submission; the minimum check and its
+counter are kept in place so a higher floor can come back by changing this."""
+
+SHOW_WORD_COUNT = False
+"""Whether the composer shows the live word counter under the text box. Hidden
+while the minimum is 1, where a counter would only be visual noise in the eye
+tracking AOI; turn it back on alongside a higher MIN_RESPONSE_WORDS."""
 
 MAX_LLM_WORDS = 75
 """Hard cap on each LLM Text Response (Section 7).
 
-Raised from the spec's original 50 because each reply now has to do two jobs:
-respond to what the participant wrote *and* invite their next response in the
-same message, rather than handing off to a separate standardized prompt."""
+Raised from the spec's original 50 because each reply has to respond to what
+the participant wrote and, in question blocks, invite their next response in
+the same message. Enforced by asking the model to rewrite, never by cutting
+(see llm.py)."""
+
+MAX_REWRITES = int(os.environ.get("MOBI_LLM_MAX_REWRITES", "2"))
+"""How many times a non-compliant reply (over MAX_LLM_WORDS, or breaking the
+block's question rule) is sent back to the model for a rewrite before the
+best attempt is delivered as is and flagged. Each round is a full model call,
+so every one added here eats into LLM_THINKING_HOLD_MS."""
 
 SCORE_MIN = 0
 SCORE_MAX = 100
 """Numeric score fields are whole numbers in [0, 100] (Section 6)."""
 
-THINKING_SLOW_AFTER_MS = 7000
-"""Tunable: when the thinking indicator switches to its 'still thinking' text.
-Section 7 describes this as a soft threshold, not a cutoff."""
+LLM_THINKING_HOLD_MS = 7000
+"""Fixed time the thinking indicator is shown before every LLM reply appears.
+
+Measured in the browser from the moment the indicator is drawn, so every turn
+presents the same wait whatever the model's latency. A reply that arrives
+sooner is held until the time is up; one that arrives later (slow model, or
+several rewrite rounds) appears on arrival, and the thinking_hidden marker
+records the overrun so that trial can be identified at analysis time."""
 
 FIXATION_CROSS_MS = 500
 """How long the inter-block fixation cross is held before a block's Scenario
@@ -162,10 +182,10 @@ for those that do not. Empty -- the default -- means "do not send it at all".
 Deliberately unset rather than "low". LiteLLM maps this onto extended thinking,
 which is a heavier mechanism than the output_config effort it replaced: measured
 on one gateway it moved mean latency from ~2.5 s to ~6.7 s (max 8.2 s), which
-straddles THINKING_SLOW_AFTER_MS. A threshold sitting inside the latency spread
-means the thinking indicator changes state on some trials and not others, which
-is a visual difference across blocks that the experiment did not ask for. Set
-this only deliberately, and move that threshold clear of the spread if you do."""
+straddles LLM_THINKING_HOLD_MS. Any turn that overruns the hold shows a longer
+wait than the others, which is a difference across blocks that the experiment
+did not ask for. Set this only deliberately, and keep the latency spread --
+rewrite rounds included -- well inside the hold if you do."""
 
 LLM_API_BASE = os.environ.get("MOBI_LLM_API_BASE", "").strip()
 LLM_API_KEY = os.environ.get("MOBI_LLM_API_KEY", "").strip()

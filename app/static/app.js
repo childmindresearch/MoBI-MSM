@@ -19,7 +19,6 @@ const state = {
   sessionId: null,
   input: null,          // the InputSpec currently being collected
   busy: false,          // a request is in flight; blocks double-submits
-  thinkingTimer: null,
   loadedParticipant: null,
   userMsgSeq: 1,
   statusText: '',        // canonical status bar text, restored after a notice
@@ -183,6 +182,11 @@ async function loadConfig() {
   els['end-title'].textContent = state.config.copy.end_title;
   els['end-body'].textContent = state.config.copy.end_body;
 
+  // The live word counter is kept but can be switched off from config. It is
+  // made invisible rather than removed, so the composer's layout -- and every
+  // AOI rectangle under it -- is the same whether or not it shows.
+  if (!state.config.show_word_count) els['word-count'].style.visibility = 'hidden';
+
   // Section 12: nothing is shown until the pinned font has settled, so text is
   // never laid out with fallback metrics and then reflowed.
   const fontOk = await ensureFontReady();
@@ -311,7 +315,7 @@ async function applyView(view) {
 
   // Blocks are self-contained: opening one clears everything before it, so the
   // transcript can never be scrolled back into a previous block. The fixation
-  // cross is held over the cleared screen before the new Scenario renders.
+  // cross is held over the cleared screen before the new vignette renders.
   if (view.reset_transcript) {
     clearTranscript();
     await showFixationCross();
@@ -357,23 +361,23 @@ function buildMessage(m) {
   node.dataset.messageId = m.id;
   node.dataset.kind = m.kind;
 
-  if (m.kind === 'scenario') {
-    // Scenario and Question appear together, with the Question's own 0/100
-    // anchor labels (Section 5, steps 1-2).
+  if (m.kind === 'vignette') {
+    // The vignette and its appraisal appear together, with the appraisal
+    // scale's 0/100 anchor labels (Section 5, steps 1-2).
     const text = document.createElement('p');
-    text.className = 'scenario-text';
+    text.className = 'vignette-text';
     text.textContent = m.text;
     node.appendChild(text);
 
     if (m.question) {
       const q = document.createElement('p');
-      q.className = 'scenario-question';
+      q.className = 'vignette-appraisal';
       q.textContent = m.question;
       node.appendChild(q);
     }
     if (m.scale_low || m.scale_high) {
       const scale = document.createElement('div');
-      scale.className = 'scenario-scale';
+      scale.className = 'vignette-scale';
       const low = document.createElement('span');
       low.innerHTML = '<b>0</b> = ';
       low.append(m.scale_low || '');
@@ -475,7 +479,7 @@ function scrollToBottom() {
 
 /* ---------- Inter-block fixation cross (Section 12) ---------- */
 
-/* Held for a fixed interval before every block's Scenario -- 13 times across a
+/* Held for a fixed interval before every block's vignette -- 13 times across a
  * session -- giving analysts a known, identical screen position to correct
  * calibration drift against. Non-interactive and not skippable: the overlay
  * covers the whole viewport and no input is on screen while it is up. */
@@ -724,7 +728,8 @@ async function onNumericSubmit(e) {
   await submit(state.input.step, raw, els['numeric-error'], els['numeric-input']);
 }
 
-/* Free text: >= 15 whitespace-delimited words; Enter submits, Shift+Enter newline. */
+/* Free text: >= min_response_words whitespace-delimited words (currently 1, so
+ * only an empty box is blocked); Enter submits, Shift+Enter newline. */
 
 function wordCount(text) {
   return text.trim().split(/\s+/).filter(Boolean).length;
@@ -763,7 +768,9 @@ async function onTextSubmit(e) {
   const min = state.config.min_response_words;
   if (n < min) {
     els['text-input'].classList.add('invalid');
-    show(els['text-error'], `Please write at least ${min} words (${n} so far).`);
+    show(els['text-error'], min <= 1
+      ? 'Please type a response.'
+      : `Please write at least ${min} words (${n} so far).`);
     sendEvent('validation_blocked', { step: state.input.step, reason: 'below_min_words', words: n });
     return;
   }
@@ -809,13 +816,20 @@ function removeLastUserMessage() {
 
 async function runLLMTurn() {
   state.busy = true;   // held until the reply arrives and the next input appears
-  showThinking();
+  const shownAt = showThinking();
   try {
     const view = await api(`/api/session/${state.sessionId}/llm`);
-    clearThinking();
+    // Fixed hold: the reply appears exactly llm_thinking_hold_ms after the
+    // indicator did, however fast the model was, so the wait is the same on
+    // every trial. A reply that took longer appears on arrival instead, and
+    // the marker says by how much it overran.
+    const replyAfter = performance.now() - shownAt;
+    const hold = state.config.llm_thinking_hold_ms;
+    if (replyAfter < hold) await new Promise((r) => setTimeout(r, hold - replyAfter));
+    clearThinking(shownAt, replyAfter);
     await applyView(view);
   } catch (err) {
-    clearThinking();
+    clearThinking(shownAt, null);
     showFatal(err, () => runLLMTurn());
   }
 }
@@ -824,18 +838,23 @@ function showThinking() {
   hideAllEntries();
   els['thinking-text'].textContent = 'Thinking';
   els['thinking'].hidden = false;
-  sendEvent('thinking_shown', { state: 'thinking' });
-  // Soft threshold, not a cutoff: the real response replaces the indicator
-  // whenever it arrives (Section 7).
-  state.thinkingTimer = setTimeout(() => {
-    els['thinking-text'].textContent = 'Hang on, still thinking';
-    sendEvent('thinking_slow_state', { state: 'still_thinking', after_ms: state.config.thinking_slow_after_ms });
-  }, state.config.thinking_slow_after_ms);
+  sendEvent('thinking_shown', { hold_ms: state.config.llm_thinking_hold_ms });
+  return performance.now();
 }
 
-function clearThinking() {
-  if (state.thinkingTimer) { clearTimeout(state.thinkingTimer); state.thinkingTimer = null; }
+function clearThinking(shownAt, replyAfter) {
   els['thinking'].hidden = true;
+  const shownMs = Math.round(performance.now() - shownAt);
+  const hold = state.config.llm_thinking_hold_ms;
+  sendEvent('thinking_hidden', {
+    hold_ms: hold,
+    actual_hold_ms: shownMs,
+    reply_after_ms: replyAfter === null ? null : Math.round(replyAfter),
+    // A reply that came back after the hold was shown late, so this trial's
+    // wait was longer than the others'. null when the request failed.
+    overran: replyAfter === null ? null : replyAfter > hold,
+    failed: replyAfter === null,
+  });
 }
 
 /* ---------- End Screen ---------- */

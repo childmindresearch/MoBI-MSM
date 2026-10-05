@@ -7,7 +7,7 @@ participant with the RA in the room on the same screen.
 
 One session is a Start Screen, a practice block, Blocks 1–12, and an End
 Screen. Each block runs the identical 15-step sequence in Section 5 of the
-spec, tied to one Scenario and one hidden Stance.
+spec, tied to one vignette (a short scenario plus an appraisal statement rated 0–100) and one hidden Stance.
 
 ## Quick start
 
@@ -43,47 +43,50 @@ Before a collection day, confirm the real model path end to end:
 Add `--model openai/gpt-5` to try a different model without touching `.env` —
 useful when comparing latency across candidates.
 
-That prints the actual reply, its word count, and the latency spread the
-participant would wait — worth checking against the 7 s threshold at which the
-thinking indicator changes text.
+That prints the actual reply, its word count, how many rewrite rounds it took,
+and the model's latency — worth checking against the fixed 7 s thinking hold
+(see below); it warns about any reply that would have overrun it.
 
-It also prints `elicited=` per reply. Each reply has to ask the participant for
-their next response in its own closing sentence, because no separate prompt
-follows it (see below), so a run that reports `elicited=False` is one where the
-participant would have faced an input box with nothing asking them for anything.
-Check both turns before a collection day — the second one closes differently:
+Check both turns and both question conditions before a collection day:
 
 ```bash
 .venv/bin/python scripts/check_llm.py --turn 2 --repeat 5
+.venv/bin/python scripts/check_llm.py --statement --repeat 5
 ```
 
-### The two follow-up prompts
+### Reply shape: the question flag and the rewrite loop
 
-User Text Response 2 and 3 have no prompt message of their own. The LLM reply
-before each of them asks for it, inside the same message, rather than the
-participant reading a reply and then a fixed "What do you make of that
-response?" beneath it. Consequences worth knowing:
+User Text Response 2 and 3 have no prompt message of their own; the input box
+follows the LLM reply directly. Whether that reply ends on a question is a
+per-block manipulation: `question_N` in `assignment.csv` (1 or 0), split so
+that within each stance half the blocks end on a question and half on a
+statement. `scripts/check_xdf.py` flags a recording whose split is uneven.
 
-- The 75-word cap exists because each reply now does two jobs. `cap_words`
-  trims overlong replies from the *body* and re-attaches the closing question,
-  because a plain trim to the last sentence boundary removes exactly the
-  sentence that has to survive.
-- `llm_text_1_elicited` / `llm_text_2_elicited` record, per turn, whether the
-  delivered reply actually closed on a question, so this is auditable in the
-  data rather than assumed.
-- The input placeholder (`app/prompts.py`, `TEXT_PLACEHOLDER`) is the fallback
-  affordance for the turns where it did not.
-- The model is told never to quote or ask about the participant's numeric
-  rating, since its closing question is the last thing they read before being
-  asked for Answer Score 2.
+Two things about every reply are enforced by a loop rather than trusted to the
+prompt: it is at most 75 words, and it follows the block's question rule. A
+draft that misses either is handed back to the model with the problem named
+(`REWRITE_INSTRUCTION` and the `PROBLEM_*` sentences in `app/llm.py`) and a
+request to rewrite it complete. Nothing is ever cut by code. After
+`MOBI_LLM_MAX_REWRITES` rounds (default 2) the shortest attempt goes out as is.
+
+- `llm_text_N_rewrites`, `llm_text_N_over_cap` and `llm_text_N_drafts` (every
+  draft, as JSON) record what happened per turn, and `llm_text_N_elicited`
+  records whether the delivered reply ended on a question, so the delivered
+  shape can be checked against `ends_with_question` in the data.
+- Each rewrite round is a full model call, so it counts against the thinking
+  hold.
+- `PROMPT_VERSION` in `app/llm.py` is recorded on every block row; bump it with
+  any change to the prompt wording or the stance prompts.
+- The input placeholder (`app/prompts.py`, `TEXT_PLACEHOLDER`) is what marks the
+  box as the participant's turn in statement blocks.
 
 ## How it fits together
 
 | File | Role |
 |---|---|
-| `app/content.py` | Loads `assignment.csv` and the three key files; resolves one participant into a practice block plus 12 blocks. |
+| `app/content.py` | Loads `assignment.csv` and the three key files (`category_key.csv`, `vignettes_appraisals.csv`, `stance_key.csv`); resolves one participant into a practice block plus 12 blocks. |
 | `app/session.py` | The per-block state machine (Section 5). Owns block index and step position. |
-| `app/llm.py` | Stance system prompts, block-local context, the 75-word cap, the per-turn closing that elicits the participant's next response, and the two providers (LiteLLM and a fake). |
+| `app/llm.py` | Stance system prompts, block-local context, the per-turn guidance, the rewrite loop that enforces the 75-word cap and the block's question rule, and the two providers (LiteLLM and a fake). |
 | `app/store.py` | SQLite persistence and CSV/JSON export. |
 | `app/markers.py` | LSL marker emission with a JSONL mirror. |
 | `scripts/check_xdf.py` | Spot-checks one finished recording against the protocol. |
@@ -98,7 +101,7 @@ through the client and the forward-only sequence cannot be skipped from it.
 
 **Blocks are self-contained.** Opening a block clears the transcript, so a
 participant can scroll within the block they are on but never back into a
-previous block's scenario or exchange. The boundary is signalled by the server
+previous block's vignette or exchange. The boundary is signalled by the server
 (`reset_transcript` on the view that opens a block) rather than inferred by the
 browser, and is covered by
 `tests/test_flow.py::test_blocks_are_self_contained`.
@@ -262,7 +265,7 @@ Typical tracker accuracy is 0.5–1°, so the layout targets:
 | Property | Degrees | At this rig | Why |
 |---|---|---|---|
 | Body line spacing | 1.24° | 55.8 px (34.9 px type) | A fixation resolves to one line, not a band of three. |
-| Scenario line spacing | 1.35° | 60.5 px (37.4 px type) | The primary reading stimulus. |
+| Vignette line spacing | 1.35° | 60.5 px (37.4 px type) | The primary reading stimulus. |
 | Gap between messages | 1.22° | 55 px | Adjacent message AOIs don't bleed together. |
 | Fixation cross | 1.00° | 44.9 px | Section 12 specifies exactly one degree. |
 | Column width | 35.6° | 1595 px | 483 px side margins keep content out of the periphery. |
@@ -294,7 +297,7 @@ screen recording) and all stamped with scroll offset, viewport size, and device
 pixel ratio:
 
 - `messages_rendered` — every message's rectangle as it appears, keyed by
-  message id and kind (`scenario`, `prompt`, `llm`, `user-numeric`,
+  message id and kind (`vignette`, `prompt`, `llm`, `user-numeric`,
   `user-text`, `interstitial`, `gate`).
 - `input_focused` — the entry area and its field, which move as the composer grows.
 - `transcript_scrolled` — trailing-throttled, emitted when the participant
@@ -315,7 +318,7 @@ physiological streams over a full sitting.
 ### Inter-block fixation cross
 
 A 1° cross (44.9 px at this rig) is held centre-screen for 500 ms before every block's
-Scenario — including the practice block, and after every inter-block gate, so
+vignette — including the practice block, and after every inter-block gate, so
 13 times per session. It is a full-viewport overlay on the same background, so
 nothing else is on screen and luminance does not change. There is no cross
 before the End Screen, since Block 12 goes straight there.
@@ -422,7 +425,14 @@ environment variables take precedence over it.
 | `MOBI_SCREEN_W_PX` / `_H_PX` | `2560` / `1440` | Monitor **native** resolution. |
 | `MOBI_VIEWING_DISTANCE_MM` | `600` | Participant eye-to-screen distance. Measure it. |
 
-### Reasoning effort and the thinking indicator
+### The fixed thinking hold and reasoning effort
+
+Every LLM reply appears exactly `LLM_THINKING_HOLD_MS` (7 s, `app/config.py`)
+after the thinking indicator does, timed in the browser. A reply that comes
+back sooner is held; one that comes back later appears on arrival. The
+`thinking_hidden` marker records the actual hold, when the reply arrived, and
+whether it overran, and `scripts/check_xdf.py` lists any trial that did — its
+wait was longer than the others'.
 
 `MOBI_LLM_EFFORT` is unset by default, deliberately. LiteLLM maps it onto
 extended thinking — a heavier mechanism than the `output_config` effort it
@@ -434,10 +444,10 @@ one gateway:
 | `low` | 5.1 s | 8.2 s | 6.7 s |
 | unset | 2.4 s | 5.9 s | 3.7 s |
 
-That matters because `THINKING_SLOW_AFTER_MS` is 7 s. With effort set, the
-threshold sits inside the latency spread, so the thinking indicator changes
-text on some trials and not others — a visual difference across blocks that
-the experiment did not ask for. Unset, every trial stays on one side of it.
+That matters because the hold is 7 s. With effort set, the hold sits inside
+the latency spread, so some trials overrun it and show a longer wait — a
+difference across blocks the experiment did not ask for. Unset, a first draft
+clears it with room to spare, but a rewrite round adds a full call on top.
 
 Re-measure with `scripts/check_llm.py --repeat 5` when changing model or
 gateway; the margin is not large.
@@ -459,8 +469,8 @@ Set `MOBI_LLM_API_BASE` with, say, `anthropic/claude-opus-5` instead and LiteLLM
 sends Anthropic-shaped requests to the proxy's URL, which is not a route it
 serves; the app logs a warning at startup when it sees that combination.
 
-Protocol constants — the 15-word minimum, the 75-word cap, the 0–100 range,
-the 7 s thinking threshold, and the 500 ms fixation-cross hold — are named at
+Protocol constants — the 1-word minimum (word counter hidden via `SHOW_WORD_COUNT`), the 75-word cap, the 0–100 range,
+the fixed 7 s thinking hold, and the 500 ms fixation-cross hold — are named at
 the top of `app/config.py`.
 Participant-facing wording lives in `app/prompts.py`.
 

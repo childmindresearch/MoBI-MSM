@@ -193,7 +193,7 @@ def expected_sequence(block_index: int) -> list[str]:
     is_final = block_index == config.REAL_BLOCK_COUNT
     seq = ["block_started"]
     for step in STEP_ORDER:
-        if step == "scenario":
+        if step == "vignette":
             continue          # rendered by open_block; nothing is submitted for it
         if step in LLM_STEPS:
             seq += [f"{step} request", f"{step} reply"]
@@ -537,12 +537,26 @@ def check_design(out: Out, rep: Report, started: list[Marker]) -> None:
     cells = Counter((str(m.get("category")), str(m.get("stance"))) for m in real)
     categories = sorted({c for c, _ in cells})
     stances = sorted({s for _, s in cells})
-    scenarios = Counter(str(m.get("scenario")) for m in real)
+    vignettes = Counter(str(m.get("vignette")) for m in real)
 
     complete = (len(real) == config.REAL_BLOCK_COUNT
                 and len(categories) * len(stances) == config.REAL_BLOCK_COUNT
                 and all(n == 1 for n in cells.values())
                 and len(cells) == config.REAL_BLOCK_COUNT)
+
+    # Within each stance, half the blocks' replies end on a question and half
+    # do not (question_N in the assignment file).
+    flagged = [m for m in real if m.get("ends_with_question") is not None]
+    if len(flagged) == config.REAL_BLOCK_COUNT:
+        per_stance: dict[str, Counter] = {}
+        for m in flagged:
+            per_stance.setdefault(str(m.get("stance")), Counter())[bool(m.get("ends_with_question"))] += 1
+        unbalanced = [f"{s}: {c[True]} question / {c[False]} statement"
+                      for s, c in sorted(per_stance.items()) if c[True] != c[False]]
+        if unbalanced:
+            rep.add(UNUSABLE, "Question and statement endings are not split evenly within each stance.",
+                    *unbalanced,
+                    "This participant's question_N columns in the assignment file are not a valid design.")
 
     shape = f"{len(categories)} categories × {len(stances)} stances"
     if complete:
@@ -562,9 +576,9 @@ def check_design(out: Out, rep: Report, started: list[Marker]) -> None:
             f"never assigned: {', '.join(empty)}" if empty else "",
             "This participant's row in the assignment file is not a valid design.")
 
-    dupes = [f"{k} ×{n}" for k, n in scenarios.items() if n > 1]
+    dupes = [f"{k} ×{n}" for k, n in vignettes.items() if n > 1]
     if dupes:
-        rep.add(UNUSABLE, f"A scenario was shown more than once: {', '.join(dupes)}.")
+        rep.add(UNUSABLE, f"A vignette was shown more than once: {', '.join(dupes)}.")
 
 
 def check_llm(out: Out, rep: Report, markers: list[Marker]) -> None:
@@ -579,21 +593,37 @@ def check_llm(out: Out, rep: Report, markers: list[Marker]) -> None:
         return
 
     latencies = [float(m.get("latency_ms", 0)) / 1000 for m in replies]
-    slow = [s for s in latencies if s * 1000 >= config.THINKING_SLOW_AFTER_MS]
     out.line("LLM", f"{plural(len(replies), 'turn')} · median {statistics.median(latencies):.1f} s "
                     f"· max {max(latencies):.1f} s")
 
-    threshold_s = config.THINKING_SLOW_AFTER_MS / 1000
-    if slow:
-        out.cont(f"{len(slow)} crossed the {threshold_s:.0f} s slow-indicator threshold")
-        rep.add(NOTE, f"{plural(len(slow), 'turn')} took longer than {threshold_s:.0f} s, so the "
-                      f"thinking indicator changed state on some trials and not others.",
-                f"slowest {max(slow):.1f} s · {len(replies) - len(slow)} of "
-                f"{len(replies)} stayed under",
-                "That is a visual difference across blocks the experiment did not ask for. "
-                "See MOBI_LLM_EFFORT in app/config.py.")
+    # Every reply is meant to appear a fixed hold after the thinking indicator.
+    # The browser's thinking_hidden marker says whether it did; a turn that
+    # overran showed a longer wait than the others.
+    hold_s = config.LLM_THINKING_HOLD_MS / 1000
+    hidden = [m for m in markers if m.event == "thinking_hidden" and not m.get("failed")]
+    if hidden:
+        overran = [m for m in hidden if m.get("overran")]
+        if overran:
+            worst = max(float(m.get("reply_after_ms", 0)) for m in overran) / 1000
+            out.cont(f"{len(overran)} overran the fixed {hold_s:.0f} s thinking hold")
+            rep.add(NOTE, f"{plural(len(overran), 'reply')} arrived after the fixed {hold_s:.0f} s "
+                          f"thinking hold, so those trials showed a longer wait than the others.",
+                    f"slowest {worst:.1f} s · blocks "
+                    f"{', '.join(str(m.block) for m in overran[:6])}",
+                    "That is a difference across blocks the experiment did not ask for. Rewrite "
+                    "rounds add a full model call each; see MOBI_LLM_EFFORT and "
+                    "MOBI_LLM_MAX_REWRITES in app/config.py.")
+        else:
+            out.cont(f"all {len(hidden)} held the fixed {hold_s:.0f} s")
+        off = [m for m in hidden if not m.get("overran")
+               and abs(float(m.get("actual_hold_ms", 0)) - config.LLM_THINKING_HOLD_MS)
+               > config.FIXATION_CROSS_TOLERANCE_MS]
+        if off:
+            rep.add(NOTE, f"{plural(len(off), 'thinking hold')} drifted more than "
+                          f"{config.FIXATION_CROSS_TOLERANCE_MS} ms from {hold_s:.0f} s.",
+                    "Browser timers were throttled, as in a backgrounded or non-fullscreen window.")
     else:
-        out.cont(f"none crossed the {threshold_s:.0f} s slow-indicator threshold")
+        out.cont("no thinking_hidden markers, so the fixed hold cannot be confirmed")
 
     # The reported latency is measured inside the server; the interval between the
     # two markers is measured by the recorder. The first can never exceed the
@@ -627,21 +657,27 @@ def check_llm(out: Out, rep: Report, markers: list[Marker]) -> None:
     else:
         out.cont(f"model {next(iter(models))}")
 
-    truncated = [m for m in replies if m.get("truncated")]
-    if truncated:
-        rep.add(NOTE, f"{plural(len(truncated), 'reply')} hit the {config.MAX_LLM_WORDS}-word "
-                      f"cap and {'was' if len(truncated) == 1 else 'were'} truncated.")
+    rewritten = [m for m in replies if int(m.get("rewrites") or 0) > 0]
+    if rewritten:
+        out.cont(f"{len(rewritten)} needed a rewrite to comply")
+    over_cap = [m for m in replies if m.get("over_cap")]
+    if over_cap:
+        rep.add(NOTE, f"{plural(len(over_cap), 'reply')} still broke the word cap or the block's "
+                      f"question rule after {config.MAX_REWRITES} rewrites, and "
+                      f"{'was' if len(over_cap) == 1 else 'were'} delivered as is.",
+                f"blocks {', '.join(str(m.block) for m in over_cap[:6])}")
     over = [m for m in replies if int(m.get("word_count", 0)) > config.MAX_LLM_WORDS]
     if over:
         rep.add(FIX, f"{plural(len(over), 'reply')} "
                      f"{'was' if len(over) == 1 else 'were'} delivered over the "
                      f"{config.MAX_LLM_WORDS}-word cap.")
-    unelicited = [m for m in replies if m.get("elicited") is False]
-    if unelicited:
-        rep.add(NOTE, f"{plural(len(unelicited), 'reply')} did not close on an invitation to "
-                      f"respond.",
-                "Those turns departed from the intended shape: the participant was asked for "
-                "their next response by the input box alone.")
+    mismatched = [m for m in replies if m.get("ends_with_question") is not None
+                  and bool(m.get("elicited")) != bool(m.get("ends_with_question"))]
+    if mismatched:
+        rep.add(NOTE, f"{plural(len(mismatched), 'reply')} did not match the block's question "
+                      f"condition.",
+                f"blocks {', '.join(str(m.block) for m in mismatched[:6])}",
+                "Those turns ended on a question in a statement block, or the reverse.")
     if failures:
         rep.add(NOTE, f"{plural(len(failures), 'LLM request')} failed and "
                       f"{'was' if len(failures) == 1 else 'were'} retried.",
