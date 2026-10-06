@@ -161,6 +161,7 @@ def test_data_is_persisted_per_block(client):
     assert json.loads(row["llm_text_1_drafts"]) == [row["llm_text_1"]]
     assert row["stance_label"] == "calibrated"  # practice block is always Calibrated
     assert row["vignette_label"] == "PRACTICE"
+    assert row["instruction_text"].startswith("Imagine you hear someone describe this.")
     assert row["appraisal_text"]
     assert row["ends_with_question"] == "1"
     assert row["prompt_version"]
@@ -443,10 +444,41 @@ def test_vignette_card_shows_the_appraisal_on_the_agreement_scale(client):
     view = client.post("/api/session", json={"participant_id": "TEST001"}).json()
     card = [m for m in view["messages"] if m["kind"] == "vignette"][0]
     assert "consistent morning routine" in card["text"]
+    assert card["instruction"].startswith("Imagine you hear someone describe this.")
     assert card["question"] == "\u201cA consistent morning routine makes people more productive for the rest of the day.\u201d"
     assert view["messages"][-1]["text"] == prompts.ANSWER_1
     assert (card["scale_low"], card["scale_high"]) == (prompts.APPRAISAL_SCALE_LOW, prompts.APPRAISAL_SCALE_HIGH)
     assert (view["input"]["scale_low"], view["input"]["scale_high"]) == ("Do not agree at all", "Completely agree")
+
+
+def test_each_intent_gets_its_own_instruction():
+    from app.content import ContentLibrary
+
+    v = ContentLibrary().vignettes
+    assert v["REF-01"].instruction_text == v["SUP-01"].instruction_text
+    assert "what you would decide to do" in v["DEC-01"].instruction_text
+    assert v["INF-12"].instruction_text.startswith("Imagine you read about this")
+    assert v["INF-13"].instruction_text.startswith("Imagine yourself in this situation")
+
+
+def test_a_blank_instruction_fails_at_load(tmp_path):
+    import csv
+    import shutil
+
+    from app.content import ContentError, ContentLibrary
+
+    for f in (config.FIXTURES_DIR).glob("*.csv"):
+        shutil.copy(f, tmp_path / f.name)
+    path = tmp_path / "vignettes_appraisals.csv"
+    with path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    rows[5]["instruction_text"] = ""
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, rows[0].keys())
+        w.writeheader()
+        w.writerows(rows)
+    with pytest.raises(ContentError, match="instruction_text"):
+        ContentLibrary(tmp_path)
 
 
 def test_assignment_rejects_a_vignette_from_the_wrong_category(tmp_path):
@@ -553,3 +585,12 @@ def test_thinking_hold_is_a_fixed_seven_seconds(client):
     assert r.status_code == 200
     r = client.post(f"/api/session/{sid}/event", json={"event": "thinking_slow_state", "detail": {}})
     assert r.status_code == 400
+
+
+def test_model_sees_the_instruction():
+    from app.content import ContentLibrary
+    from app.llm import Turn, build_messages
+
+    block = ContentLibrary().practice
+    header = build_messages(block, 60, 70, [Turn("user", "Because routines help.")])[0]["content"]
+    assert f"Instruction I was given:\n{block.vignette.instruction_text}" in header

@@ -42,7 +42,8 @@ log = logging.getLogger(__name__)
 
 # Recorded on every block row, so a change to the wording below is visible in
 # the data. Bump it whenever RESPONSE_FRAMING, TURN_GUIDANCE, QUESTION_RULES,
-# the rewrite instructions or the stance prompts in stance_key.csv change.
+# the rewrite instructions, the stance prompts in stance_key.csv, or the
+# instruction_text wording in the vignette keys change.
 #
 #   1  every reply had to end on a question that elicited the next response;
 #      over-long replies were cut to MAX_LLM_WORDS by code.
@@ -51,7 +52,9 @@ log = logging.getLogger(__name__)
 #      a loop instead of being cut by code; turn 2 must engage what the
 #      participant added rather than restate; scenarios became vignettes rated
 #      as agreement with an appraisal statement.
-PROMPT_VERSION = "2"
+#   3  the model also sees the per-vignette instruction the participant was
+#      given (imagine yourself in it, or imagine reading about it).
+PROMPT_VERSION = "3"
 
 # Framing appended to the Stance prompt. The Stance controls posture; this
 # controls form, so that response *shape* is constant across conditions and
@@ -226,7 +229,7 @@ def build_system_prompt(block: BlockPlan, turn_number: int = 1, ends_with_questi
 def build_messages(block: BlockPlan, answer_score_1: int, confidence_score_1: int, turns: list[Turn]) -> list[dict[str, str]]:
     """Compose the block-local conversation.
 
-    The vignette, its appraisal, and the participant's own numeric judgment
+    The vignette, its instruction, its appraisal, and the participant's own numeric judgment
     are folded into their first message so the model has the full local
     context without any carryover between blocks. The model-facing labels say
     "Scenario" to match the wording of RESPONSE_FRAMING.
@@ -237,6 +240,7 @@ def build_messages(block: BlockPlan, answer_score_1: int, confidence_score_1: in
     vignette = block.vignette
     header = (
         f"Scenario:\n{vignette.text}\n\n"
+        f"Instruction I was given:\n{vignette.instruction_text}\n\n"
         f"Statement I rated:\n{prompts.APPRAISAL.format(appraisal_text=vignette.appraisal_text)}\n"
         f"(Scale: 0 = {prompts.APPRAISAL_SCALE_LOW}, 100 = {prompts.APPRAISAL_SCALE_HIGH})\n\n"
         f"My rating: {answer_score_1} out of 100. My confidence in that rating: {confidence_score_1} out of 100.\n\n"

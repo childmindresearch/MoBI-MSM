@@ -362,12 +362,19 @@ function buildMessage(m) {
   node.dataset.kind = m.kind;
 
   if (m.kind === 'vignette') {
-    // The vignette and its appraisal appear together, with the appraisal
-    // scale's 0/100 anchor labels (Section 5, steps 1-2).
+    // The vignette, its instruction and its appraisal appear together, with
+    // the appraisal scale's 0/100 anchor labels (Section 5, steps 1-2).
     const text = document.createElement('p');
     text.className = 'vignette-text';
     text.textContent = m.text;
     node.appendChild(text);
+
+    if (m.instruction) {
+      const i = document.createElement('p');
+      i.className = 'vignette-instruction';
+      i.textContent = m.instruction;
+      node.appendChild(i);
+    }
 
     if (m.question) {
       const q = document.createElement('p');
