@@ -10,12 +10,13 @@ same thing is a vignette.
 # agreement scale, so its presentation and anchors are fixed here rather than
 # carried per vignette. Shown on the vignette card with the anchors beneath
 # it, restated for Answer Score 2, and given to the model as the statement the
-# participant rated. The question itself is ANSWER_1, in the next message.
+# participant rated. The instruction above it, which comes per vignette from
+# the key, already asks for the rating, so ANSWER_1 only says how to enter it.
 APPRAISAL = "“{appraisal_text}”"
 APPRAISAL_SCALE_LOW = "Do not agree at all"
 APPRAISAL_SCALE_HIGH = "Completely agree"
 
-ANSWER_1 = "Using the scale above, what is your answer? Enter a whole number from 0 to 100."
+ANSWER_1 = "Enter a whole number from 0 to 100."
 
 CONFIDENCE_1 = (
     "How confident are you in that answer? Enter a whole number from 0 to 100, "

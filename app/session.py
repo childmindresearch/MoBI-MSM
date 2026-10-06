@@ -81,6 +81,7 @@ class Message:
     text: str
     scale_low: str | None = None
     scale_high: str | None = None
+    instruction: str | None = None
     question: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -211,7 +212,7 @@ class Session:
     # --- rendering ---
 
     def open_block(self) -> StepView:
-        """Render the vignette and its appraisal together, then ask for Answer
+        """Render the vignette, its instruction and its appraisal together, then ask for Answer
         Score 1 (Section 5, steps 1-3)."""
         if self._step != "vignette":
             raise FlowError(f"open_block called while on step {self._step!r}")
@@ -228,6 +229,7 @@ class Session:
                 self._next_id(),
                 "vignette",
                 block.vignette.text,
+                instruction=block.vignette.instruction_text,
                 question=self._appraisal(),
                 scale_low=prompts.APPRAISAL_SCALE_LOW,
                 scale_high=prompts.APPRAISAL_SCALE_HIGH,
@@ -424,6 +426,7 @@ class Session:
             "category_name": block.category_name,
             "vignette_label": block.vignette.label,
             "vignette_text": block.vignette.text,
+            "instruction_text": block.vignette.instruction_text,
             "appraisal_text": block.vignette.appraisal_text,
             "stance_label": block.stance.label,
             "stance_name": block.stance.name,

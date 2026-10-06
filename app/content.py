@@ -4,8 +4,9 @@ Per Section 4 of the spec, block order and content come from a pre-generated
 assignment CSV whose cells are lookup labels, resolved at runtime against a
 category key, a vignette key (vignettes_appraisals.csv), and a stance key.
 
-A vignette is a short imagined situation; its appraisal is a first-person
-statement about it that the participant rates on the 0-100 agreement scale.
+A vignette is a short imagined situation; its instruction tells the
+participant how to approach it, and its appraisal is a first-person statement
+about it that the participant rates on the 0-100 agreement scale.
 The scale is the same for every appraisal, so its anchor labels live in
 prompts.py rather than in the key. Validation of those files is
 explicitly the research team's job (Section 11) -- this module does the minimum
@@ -30,6 +31,7 @@ class Vignette:
     label: str                # VID, e.g. DEC-01
     category_label: str       # the key's Intent column: DEC, INF, REF or SUP
     text: str
+    instruction_text: str     # how to approach the vignette, shown before the appraisal
     appraisal_text: str
 
 
@@ -79,6 +81,14 @@ def _flag(raw: str, where: str) -> bool:
     raise ContentError(f"{where}: expected 1 or 0, got {raw!r}")
 
 
+def _required(row: dict[str, str], column: str, where: str) -> str:
+    """A cell the participant must see. Blank is a broken key file, not a default."""
+    value = row.get(column, "")
+    if not value:
+        raise ContentError(f"{where}: {column} is missing or blank")
+    return value
+
+
 class ContentLibrary:
     """The four content files, loaded once at startup and resolved per participant."""
 
@@ -102,6 +112,7 @@ class ContentLibrary:
                 label=r["VID"],
                 category_label=r["Intent"],
                 text=r["vignette_text"],
+                instruction_text=_required(r, "instruction_text", f"vignettes_appraisals.csv {r['VID']}"),
                 appraisal_text=r["appraisal_text"],
             )
         return out
@@ -127,6 +138,7 @@ class ContentLibrary:
             label=row["VID"],
             category_label="practice",
             text=row["vignette_text"],
+            instruction_text=_required(row, "instruction_text", path.name),
             appraisal_text=row["appraisal_text"],
         )
         return BlockPlan(

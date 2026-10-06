@@ -49,7 +49,7 @@ BLOCK_VALUE_COLUMNS: tuple[str, ...] = (
 BLOCK_META_COLUMNS: tuple[str, ...] = (
     "session_id", "participant_id", "block_index", "is_practice",
     "category_label", "category_name",
-    "vignette_label", "vignette_text", "appraisal_text",
+    "vignette_label", "vignette_text", "instruction_text", "appraisal_text",
     "stance_label", "stance_name",
     "ends_with_question", "prompt_version",
 )

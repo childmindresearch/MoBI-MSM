@@ -314,6 +314,23 @@ button:not(:disabled):hover { filter: brightness(1.08); }
   max-width: var(--measure);
 }
 
+.vignette-instruction {
+  margin: calc(var(--deg) * 0.944) 0 0;
+  padding-top: calc(var(--deg) * 0.833);
+  border-top: 1px solid var(--line);
+  font-size: var(--font-vignette);
+  line-height: 1.62;
+  color: var(--ink-soft);
+  max-width: var(--measure);
+}
+
+/* The instruction carries the divider, so the appraisal sits right under it. */
+.vignette-instruction + .vignette-appraisal {
+  margin-top: calc(var(--deg) * 0.611);
+  padding-top: 0;
+  border-top: none;
+}
+
 .vignette-scale {
   display: flex;
   justify-content: space-between;
