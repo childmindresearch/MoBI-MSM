@@ -88,7 +88,7 @@ request to rewrite it complete. Nothing is ever cut by code. After
 | `app/session.py` | The per-block state machine (Section 5). Owns block index and step position. |
 | `app/llm.py` | Stance system prompts, block-local context, the per-turn guidance, the rewrite loop that enforces the 75-word cap and the block's question rule, and the two providers (LiteLLM and a fake). |
 | `app/store.py` | SQLite persistence and CSV/JSON export. |
-| `app/markers.py` | LSL marker emission with a JSONL mirror. |
+| `app/markers.py` | LSL marker emission with a JSONL mirror. Every marker and field is described in [MARKER_KEY.md](MARKER_KEY.md). |
 | `scripts/check_xdf.py` | Spot-checks one finished recording against the protocol. |
 | `app/prompts.py` | All participant-facing copy, in one place. |
 | `app/static/` | The browser interface (no build step, no dependencies). |
