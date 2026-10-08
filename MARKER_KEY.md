@@ -75,6 +75,11 @@ Presentation markers (`messages_rendered`, `input_focused`,
 `fixation_cross_*`, `thinking_*`, and so on) appear between these flow
 markers, as the screen changes.
 
+Every message the server sends is also logged as a `message_created`, with
+its text, straight after the flow marker that produced it: after
+`block_started` for the block's opening messages, after `submission_recorded`
+for the next prompt, and after `llm_response_received` for a reply.
+
 ## Marker reference
 
 ### Session lifecycle
@@ -83,7 +88,7 @@ markers, as the screen changes.
 |---|---|---|---|
 | `app_started` | server | Server starts, usually once per collection day. It fires before anyone presses Record, so it is in the JSONL but **not in the XDF**. | `app_version`, `llm_provider`, `llm_model`, `lsl` (true if the LSL outlet is live), `participants` (number of rows in the assignment file) |
 | `participant_lookup_failed` | server | The Start Screen rejected an ID. There is no session yet, so this marker goes only to `data/markers/no-session.jsonl` and the XDF, not the database. | `reason`: `not_found` (ID is not in the assignment file) or `already_run` (ID already completed a session) |
-| `session_started` | server | Valid ID accepted, and the session is created. | `block_count` (13 = practice + 12), `ui_font` (font name, or `SYSTEM-FALLBACK`), `font_installed`, and the display rig needed to convert pixels to degrees: `px_per_degree`, `viewing_distance_mm`, `pixel_pitch_mm`, `screen_w_px`, `screen_h_px`, `screen_diagonal_in` |
+| `session_started` | server | Valid ID accepted, and the session is created. | `block_count` (13 = practice + 12), `ui_font` (font name, or `SYSTEM-FALLBACK`), `font_installed`, `ui_font_sha256` (hash of the font file, naming the exact face the words were laid out in; `null` if it is missing), and the display rig needed to convert pixels to degrees: `px_per_degree`, `viewing_distance_mm`, `pixel_pitch_mm`, `screen_w_px`, `screen_h_px`, `screen_diagonal_in` |
 | `start_screen_shown` | client | The task screen replaces the Start Screen. (Despite the name, this marks the Start Screen being *left*.) | `font` (font in use, or `SYSTEM-FALLBACK`), `font_ok` |
 | `presentation_mode_checked` | client | Once, at session start. Checks fullscreen and display scaling. | `fullscreen`, `screen_w`, `screen_h`, `expected_screen_w`, `expected_screen_h`, `scale_mismatch` (**true means the visual-angle sizing is invalid for this session**), `px_per_degree`, `viewing_distance_mm`, `resolved_deg_px` (pixels per degree as the browser actually applied it), plus the [viewport fields](#viewport-fields) |
 | `session_completed` | server | The block 12 activation rating was recorded. The session is done. | — |
@@ -102,25 +107,32 @@ markers, as the screen changes.
 | Marker | Source | When it fires | Fields |
 |---|---|---|---|
 | `llm_request_sent` | server | The server asks the model for a reply. | `step`: `llm_1` or `llm_2` |
-| `llm_response_received` | server | The reply is back and accepted. The participant sees it later, when the 7 s thinking hold ends (see `thinking_hidden`). | `latency_ms` (total model time, including any rewrite rounds), `rewrites` (rewrite rounds needed; 0 = the first draft complied), `over_cap` (true if it was still non-compliant after the maximum number of rewrites and went out anyway), `ends_with_question` (what the block *required*), `elicited` (whether the delivered reply *actually* ended on a question), `word_count`, `model`, `provider`, `requested_at`, `received_at`. The reply text is not in the marker; it is in the `blocks` table as `llm_text_N`. |
+| `llm_response_received` | server | The reply is back and accepted. The participant sees it later, when the 7 s thinking hold ends (see `thinking_hidden`). | `latency_ms` (total model time, including any rewrite rounds), `rewrites` (rewrite rounds needed; 0 = the first draft complied), `over_cap` (true if it was still non-compliant after the maximum number of rewrites and went out anyway), `ends_with_question` (what the block *required*), `elicited` (whether the delivered reply *actually* ended on a question), `word_count`, `text` (the reply exactly as shown), `model`, `provider`, `requested_at`, `received_at` |
 | `llm_request_failed` | server | The model call errored. The participant sees an error notice with a retry, and the retry produces a new `llm_request_sent`. | `error` |
 | `thinking_shown` | client | The "Thinking" indicator appears. | `hold_ms` (nominal hold, 7000) |
 | `thinking_hidden` | client | The indicator disappears and the reply is about to render. | `hold_ms`, `actual_hold_ms` (how long it was really on screen), `reply_after_ms` (when the reply arrived, relative to the indicator), `overran` (true if the reply took longer than the hold, so this trial's wait was longer than others'), `failed` (true if the request errored) |
 
 ### What is on screen (AOI geometry)
 
-These markers let you map gaze to content. All rectangles are
-**viewport-relative CSS pixels** (`x`, `y`, `w`, `h`), in the same frame as the
-screen recording. Convert to degrees with `px_per_degree` from
+These markers let you map gaze to content. Two coordinate frames are used,
+both in CSS pixels. Convert either to degrees with `px_per_degree` from
 `session_started`.
+
+- **`geometry`: viewport-relative** (`x`, `y`, `w`, `h`), the same frame as
+  the screen recording, valid at the moment the marker fired.
+- **`layout`: content-relative**, for word-level analysis. See
+  [Word layout](#word-layout).
 
 | Marker | Source | When it fires | Fields |
 |---|---|---|---|
+| `message_created` | server | The server built a message and is sending it to the browser. Fires once per message, before it is painted. | `message_id` (matches `messages_rendered`), `kind` ([message kinds](#message-kinds)), `text`. The vignette also has `instruction`, `question` (the appraisal statement), `scale_low`, and `scale_high`. |
 | `fixation_cross_shown` | client | A 1° cross is painted at screen center, before every block's vignette (13 times per session). | `geometry.cross` (rectangle), `hold_ms` (nominal, 500), `scroll_top` (always 0), plus the [viewport fields](#viewport-fields) |
 | `fixation_cross_hidden` | client | The cross is removed and the vignette is painted. | `nominal_hold_ms`, `actual_hold_ms`, `drift_ms` (actual minus nominal), `within_tolerance` (true if within ±50 ms) |
-| `messages_rendered` | client | One or more messages were painted. Fires after the browser actually draws them. | `message_ids`, `kinds` ([message kinds](#message-kinds)), `geometry` (one rectangle per message: `id`, `kind`, `x`, `y`, `w`, `h`), plus the [viewport fields](#viewport-fields) |
+| `messages_rendered` | client | One or more messages were painted. Fires after the browser actually draws them. | `message_ids`, `kinds` ([message kinds](#message-kinds)), `geometry` (one rectangle per message: `id`, `kind`, `x`, `y`, `w`, `h`), `layout` (every word and line in them; see [Word layout](#word-layout)), plus the [viewport fields](#viewport-fields) |
+| `layout_changed` | client | The transcript column changed width, so its text reflowed. Should never happen on the kiosk. Every message on screen is measured again. | `previous_width`, `width`, `message_ids`, `geometry`, `layout` (replaces each message's earlier layout from here on), plus the [viewport fields](#viewport-fields) |
 | `input_focused` | client | An input appears and takes focus (number box, text box, or Continue button). | `step`, `type` (`numeric`, `text`, or `gate`), `geometry.entry` (the whole entry area), `geometry.field` (the box or button itself), plus the [viewport fields](#viewport-fields) |
-| `transcript_scrolled` | client | The participant scrolled within the block. Throttled to one marker per settled scroll. | The [viewport fields](#viewport-fields) |
+| `transcript_scroll_began` | client | The transcript started moving, either from the participant scrolling or from the automatic scroll to a new message. From here until the next `transcript_scrolled`, where any word is on screen is unknown. | The [viewport fields](#viewport-fields), at the start of the movement |
+| `transcript_scrolled` | client | The scroll settled. Throttled to one marker per settled scroll. | The [viewport fields](#viewport-fields) |
 
 ### Recording integrity
 
@@ -142,6 +154,45 @@ screen recording. Convert to degrees with `px_per_degree` from
 
 ## Value lookups
 
+### Word layout
+
+`layout` on `messages_rendered` and `layout_changed` lists the text exactly as
+it was laid out on screen. It has one entry per **part** of a message. Most
+messages have one part, `text`. The vignette card has up to five: `text` (the
+scenario), `instruction`, `question` (the appraisal statement), `scale_low`,
+and `scale_high`. The anchors are shown with their number in front, so
+`scale_low` reads `0 = …` and `scale_high` reads `100 = …`.
+
+| Field | Meaning |
+|---|---|
+| `id` | The message id, matching `message_created` |
+| `part` | Which part of the message, as above |
+| `font` | The computed style the part was laid out in: `family`, `size_px`, `line_height_px`, `weight`, `letter_spacing` |
+| `lines` | One per rendered line: `i`, `x0` and `x1` (the line's left and right ink edges), `y` and `h` (its glyph box, not the full line height) |
+| `words` | One per word: `i`, `t` (the word as shown), `line` (index into `lines`), and its box `x`, `y`, `w`, `h`. A word that wrapped across lines also has `split`: one box per line. |
+
+**A word** is a run of non-whitespace, so punctuation stays attached to it.
+That is the same rule as the server's word counts, so word `i` is token `i` of
+the matching `text.split()`. `scripts/check_xdf.py` checks this for every
+message.
+
+**Coordinates are content-relative.** They are measured from the top-left of
+the transcript's scrolling area, as if it were scrolled to the very top. A word
+never moves in this frame for the rest of its block (unless a `layout_changed`
+says otherwise), so it is measured once. To place a word on screen at any
+moment, take `scroller`, `scroll_top`, and `scroll_left` from the latest
+marker carrying the [viewport fields](#viewport-fields):
+
+```
+screen_x = x + scroller.x - scroll_left
+screen_y = y + scroller.y - scroll_top
+```
+
+Between a `transcript_scroll_began` and the next `transcript_scrolled` the
+content is moving, so exclude gaze from that interval or use the screen
+recording. A screen position also has to fall inside the `scroller` box to be
+visible; outside it the word is scrolled out of view.
+
 ### Viewport fields
 
 Carried on the markers noted above, so that rectangles can be placed after
@@ -149,7 +200,9 @@ any scrolling.
 
 | Field | Meaning |
 |---|---|
-| `scroll_top` | How far the transcript is scrolled, in px. Add it to a rectangle's `y` to get its position within the content. |
+| `scroll_top` | How far the transcript is scrolled, in px |
+| `scroll_left` | Horizontal scroll, in px. Always 0 on the rig; only non-zero in a window narrower than the column. |
+| `scroller` | The transcript's scrolling area in the viewport (`x`, `y`, `w`, `h`): the origin of the content frame, and the window the content is seen through. A `geometry` rectangle's content position is `y - scroller.y + scroll_top`. |
 | `scroll_height` | Total height of the transcript content, in px |
 | `viewport_w`, `viewport_h` | Browser viewport size, in CSS px |
 | `device_pixel_ratio` | Should be 1 on the rig. Any other value means display scaling is on. |
@@ -210,8 +263,10 @@ told to take. The practice block always uses `calibrated`.
   stream live (for example `scripts/check_lsl.py --watch`) can see the
   condition.
 - **Participant text.** `submission_recorded` for `text_1`, `text_2`, and
-  `text_3` contains the participant's free text verbatim. Treat the JSONL, the
-  XDF, and the database as identifiable. `scripts/check_xdf.py --timeline`
-  leaves free text out.
+  `text_3` contains the participant's free text verbatim, and so does the
+  `layout` of each `user-text` message, word by word. The AI replies
+  (`llm_response_received`, `message_created`) respond to that text and can
+  quote it. Treat the JSONL, the XDF, and the database as identifiable.
+  `scripts/check_xdf.py --timeline` leaves all of this text out.
 - **Rejected IDs.** Every ID typed at the Start Screen that failed the lookup,
   typos included, is in `participant_lookup_failed`.

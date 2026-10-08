@@ -300,8 +300,17 @@ pixel ratio:
   message id and kind (`vignette`, `prompt`, `llm`, `user-numeric`,
   `user-text`, `interstitial`, `gate`).
 - `input_focused` — the entry area and its field, which move as the composer grows.
-- `transcript_scrolled` — trailing-throttled, emitted when the participant
-  scrolls within a block, so gaze still maps to content after the view moves.
+- `transcript_scroll_began` / `transcript_scrolled` — the start and the
+  settled end of every scroll, so gaze still maps to content after the view
+  moves, and the in-motion interval can be excluded.
+
+For word-level analysis, the server logs every message's literal text as
+`message_created`, and `messages_rendered` carries a `layout`: every word and
+line the browser laid out, with its box and computed font, in content-relative
+coordinates that stay valid for the whole block. `scripts/check_xdf.py`
+confirms the measured words join back up to the server's text. The coordinate
+frame and the conversion to screen position are in
+[MARKER_KEY.md](MARKER_KEY.md#word-layout).
 
 `session_started` additionally records `px_per_degree`, `viewing_distance_mm`,
 `pixel_pitch_mm`, and the screen dimensions, so pixel rectangles convert to

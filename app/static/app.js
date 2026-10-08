@@ -25,6 +25,7 @@ const state = {
   statusNoticeTimer: null,
   fontOk: false,
   unfocusedSince: null,  // wall-clock ms when the window last lost focus
+  transcriptWidth: 0,    // last laid-out column width; a change means words reflowed
 };
 
 document.addEventListener('DOMContentLoaded', init);
@@ -78,14 +79,24 @@ function init() {
 
   // Scroll changes the mapping from screen position to content, so they are
   // reported (trailing-throttled -- one marker per settled scroll, not per frame).
+  // The first scroll event of a movement is reported too: between it and the
+  // settled marker, where any word is on screen is unknown.
   let scrollTimer = null;
   els['transcript-scroll'].addEventListener('scroll', () => {
     if (scrollTimer) clearTimeout(scrollTimer);
+    else sendEvent('transcript_scroll_began', viewportState());
     scrollTimer = setTimeout(() => {
       scrollTimer = null;
       sendEvent('transcript_scrolled', viewportState());
     }, 120);
   }, { passive: true });
+
+  // Word positions are measured once, on the content, and stay valid for the
+  // block only while the column keeps its width. If it ever reflows (a window
+  // resize), every message on screen is measured again.
+  if (window.ResizeObserver) {
+    new ResizeObserver(onTranscriptResize).observe(els['transcript']);
+  }
 
   installFocusIntegrity();
 
@@ -350,6 +361,7 @@ function appendMessages(messages) {
       message_ids: ids,
       kinds: messages.map((m) => m.kind),
       geometry: messageGeometry(ids),
+      layout: messageLayout(ids),
       ...viewportState(),
     });
   });
@@ -366,12 +378,14 @@ function buildMessage(m) {
     // the appraisal scale's 0/100 anchor labels (Section 5, steps 1-2).
     const text = document.createElement('p');
     text.className = 'vignette-text';
+    text.dataset.part = 'text';
     text.textContent = m.text;
     node.appendChild(text);
 
     if (m.instruction) {
       const i = document.createElement('p');
       i.className = 'vignette-instruction';
+      i.dataset.part = 'instruction';
       i.textContent = m.instruction;
       node.appendChild(i);
     }
@@ -379,6 +393,7 @@ function buildMessage(m) {
     if (m.question) {
       const q = document.createElement('p');
       q.className = 'vignette-appraisal';
+      q.dataset.part = 'question';
       q.textContent = m.question;
       node.appendChild(q);
     }
@@ -386,9 +401,11 @@ function buildMessage(m) {
       const scale = document.createElement('div');
       scale.className = 'vignette-scale';
       const low = document.createElement('span');
+      low.dataset.part = 'scale_low';
       low.innerHTML = '<b>0</b> = ';
       low.append(m.scale_low || '');
       const high = document.createElement('span');
+      high.dataset.part = 'scale_high';
       high.innerHTML = '<b>100</b> = ';
       high.append(m.scale_high || '');
       scale.append(low, high);
@@ -397,6 +414,7 @@ function buildMessage(m) {
     return node;
   }
 
+  node.dataset.part = 'text';
   node.textContent = m.text;
   return node;
 }
@@ -443,11 +461,154 @@ function messageGeometry(ids) {
 function viewportState() {
   return {
     scroll_top: Math.round(els['transcript-scroll'].scrollTop),
+    scroll_left: Math.round(els['transcript-scroll'].scrollLeft),
     scroll_height: Math.round(els['transcript-scroll'].scrollHeight),
+    scroller: scrollerBox(),
     viewport_w: window.innerWidth,
     viewport_h: window.innerHeight,
     device_pixel_ratio: window.devicePixelRatio,
   };
+}
+
+/* ---------- Word layout (word-level eye tracking) ---------- */
+
+/* Word and line boxes are in CONTENT coordinates: measured from the top-left of
+ * the transcript's scrolling area as if it were scrolled to the top. A word
+ * never moves in this frame for the rest of its block, so it is measured once.
+ * To place it on screen at any moment:
+ *   screen_x = x + scroller.x - scroll_left
+ *   screen_y = y + scroller.y - scroll_top
+ * using the scroller and scroll_top from the latest marker carrying the
+ * viewport fields. */
+
+/* The scrolling area's padding box, in viewport px: the origin of the content
+ * frame, and the window the content is seen through. */
+function scrollerBox() {
+  const el = els['transcript-scroll'];
+  const r = el.getBoundingClientRect();
+  return {
+    x: Math.round(r.left + el.clientLeft), y: Math.round(r.top + el.clientTop),
+    w: el.clientWidth, h: el.clientHeight,
+  };
+}
+
+function toContent(r, origin) {
+  return {
+    x: Math.round(r.left - origin.left),
+    y: Math.round(r.top - origin.top),
+    w: Math.round(r.width), h: Math.round(r.height),
+  };
+}
+
+function messageLayout(ids) {
+  const out = [];
+  for (const id of ids) {
+    const node = els['transcript'].querySelector(`[data-message-id="${CSS.escape(id)}"]`);
+    if (!node) continue;
+    for (const el of node.querySelectorAll('[data-part]')) out.push(partLayout(id, el));
+    if (node.dataset.part) out.push(partLayout(id, node));
+  }
+  return out;
+}
+
+/* One block of text: its computed font, its lines, and every word in it.
+ * A word is a run of non-whitespace -- the same rule as the server's
+ * word_count() -- so word i here is token i of the server's text.split(). */
+function partLayout(id, el) {
+  const scroller = els['transcript-scroll'];
+  const sr = scroller.getBoundingClientRect();
+  const origin = {
+    left: sr.left + scroller.clientLeft - scroller.scrollLeft,
+    top: sr.top + scroller.clientTop - scroller.scrollTop,
+  };
+
+  // Text nodes with their offsets into the element's full text, so a word that
+  // straddles two nodes (the bold "0" in a scale anchor) is still one range.
+  const nodes = [];
+  let full = '';
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    nodes.push({ node: n, start: full.length });
+    full += n.data;
+  }
+  const locate = (offset) => {
+    let k = nodes.length - 1;
+    while (k > 0 && nodes[k].start > offset) k--;
+    return [nodes[k].node, offset - nodes[k].start];
+  };
+
+  const style = getComputedStyle(el);
+  const fontSize = parseFloat(style.fontSize);
+  const words = [];
+  const lines = [];
+  const lineOf = (box) => {
+    // A box starts a new line when its top is more than half a font size below
+    // the current line's; ranges on one line can differ by a pixel or so.
+    let line = lines[lines.length - 1];
+    if (!line || box.y - line.y > fontSize / 2) {
+      line = { i: lines.length, x0: box.x, x1: box.x + box.w, y: box.y, y1: box.y + box.h };
+      lines.push(line);
+    } else {
+      line.x0 = Math.min(line.x0, box.x);
+      line.x1 = Math.max(line.x1, box.x + box.w);
+      line.y = Math.min(line.y, box.y);
+      line.y1 = Math.max(line.y1, box.y + box.h);
+    }
+    return line.i;
+  };
+
+  const range = document.createRange();
+  const re = /\S+/g;
+  for (let m = re.exec(full); m; m = re.exec(full)) {
+    range.setStart(...locate(m.index));
+    range.setEnd(...locate(m.index + m[0].length));
+    const boxes = [...range.getClientRects()]
+      .filter((r) => r.width > 0 && r.height > 0)
+      .map((r) => toContent(r, origin));
+    if (!boxes.length) continue;
+    const pieces = boxes.map((b) => ({ ...b, line: lineOf(b) }));
+    const word = { i: words.length, t: m[0], ...pieces[0] };
+    // A word broken across lines has one box per line; all of them are kept.
+    if (pieces.length > 1) word.split = pieces;
+    words.push(word);
+  }
+
+  const lineHeight = parseFloat(style.lineHeight);
+  return {
+    id,
+    part: el.dataset.part,
+    font: {
+      family: style.fontFamily,
+      size_px: Math.round(fontSize * 100) / 100,
+      line_height_px: isFinite(lineHeight) ? Math.round(lineHeight * 100) / 100 : null,
+      weight: style.fontWeight,
+      letter_spacing: style.letterSpacing,
+    },
+    lines: lines.map((l) => ({ i: l.i, x0: l.x0, x1: l.x1, y: l.y, h: l.y1 - l.y })),
+    words,
+  };
+}
+
+function onTranscriptResize(entries) {
+  const width = Math.round(entries[entries.length - 1].contentRect.width);
+  const previous = state.transcriptWidth;
+  state.transcriptWidth = width;
+  // Hidden (width 0) and first-shown transitions are not reflows: nothing on
+  // screen was laid out at another width.
+  if (!previous || !width || previous === width || !state.sessionId) return;
+  const ids = [...els['transcript'].querySelectorAll('[data-message-id]')]
+    .map((n) => n.dataset.messageId);
+  if (!ids.length) return;
+  afterPaint(() => {
+    sendEvent('layout_changed', {
+      previous_width: previous,
+      width,
+      message_ids: ids,
+      geometry: messageGeometry(ids),
+      layout: messageLayout(ids),
+      ...viewportState(),
+    });
+  });
 }
 
 function clearTranscript() {
@@ -462,6 +623,7 @@ function appendUserMessage(text, numeric) {
   const id = `u${state.userMsgSeq++}`;
   node.dataset.messageId = id;
   node.dataset.kind = numeric ? 'user-numeric' : 'user-text';
+  node.dataset.part = 'text';
   node.textContent = text;
   els['transcript'].appendChild(node);
   scrollToBottom();
@@ -470,6 +632,7 @@ function appendUserMessage(text, numeric) {
       message_ids: [id],
       kinds: [node.dataset.kind],
       geometry: messageGeometry([id]),
+      layout: messageLayout([id]),
       ...viewportState(),
     });
   });

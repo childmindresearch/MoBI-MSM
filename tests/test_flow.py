@@ -594,3 +594,151 @@ def test_model_sees_the_instruction():
     block = ContentLibrary().practice
     header = build_messages(block, 60, 70, [Turn("user", "Because routines help.")])[0]["content"]
     assert f"Instruction I was given:\n{block.vignette.instruction_text}" in header
+
+
+# --- word-level eye tracking --------------------------------------------------
+
+def _markers(tmp_path, sid):
+    lines = (tmp_path / "markers" / f"{sid}.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def _load_check_xdf():
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / "check_xdf.py"
+    spec = importlib.util.spec_from_file_location("check_xdf", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["check_xdf"] = module   # dataclasses look their module up by name
+    spec.loader.exec_module(module)
+    return module
+
+
+def _shown_parts(message):
+    """What the browser puts on screen for a message, part by part, as
+    buildMessage in app.js renders it."""
+    if message["kind"] != "vignette":
+        return {"text": message["text"]}
+    parts = {"text": message["text"]}
+    for key in ("instruction", "question"):
+        if message.get(key):
+            parts[key] = message[key]
+    if message.get("scale_low"):
+        parts["scale_low"] = f"0 = {message['scale_low']}"
+    if message.get("scale_high"):
+        parts["scale_high"] = f"100 = {message['scale_high']}"
+    return parts
+
+
+def _fake_render(client, sid, messages, kind=None):
+    """Report a messages_rendered the way the browser does, one word per token."""
+    layout = []
+    for m in messages:
+        for part, text in _shown_parts(m).items():
+            words = [{"i": i, "t": t, "line": 0, "x": 10 * i, "y": 0, "w": 9, "h": 20}
+                     for i, t in enumerate(text.split())]
+            layout.append({"id": m["id"], "part": part,
+                           "font": {"family": '"MoBI UI", sans-serif', "size_px": 34.9},
+                           "lines": [], "words": words})
+    detail = {"message_ids": [m["id"] for m in messages],
+              "kinds": [kind or m["kind"] for m in messages],
+              "geometry": [{"id": m["id"], "kind": kind or m["kind"]} for m in messages],
+              "layout": layout}
+    r = client.post(f"/api/session/{sid}/event", json={"event": "messages_rendered", "detail": detail})
+    assert r.status_code == 200, r.text
+
+
+def test_every_message_is_logged_with_its_text(client, tmp_path):
+    """Word-level gaze analysis needs the words themselves in the recording, not
+    only in the database: every message the server hands the browser is logged
+    with its literal text, and each AI reply carries its text too."""
+    view = client.post("/api/session", json={"participant_id": "TEST002"}).json()
+    sid = view["session_id"]
+    shown = list(view["messages"])
+    while True:
+        if view.get("awaiting_llm"):
+            view = client.post(f"/api/session/{sid}/llm").json()
+        else:
+            spec = view["input"]
+            value = 55 if spec["type"] == "numeric" else WORDS if spec["type"] == "text" else True
+            view = client.post(f"/api/session/{sid}/submit",
+                               json={"step": spec["step"], "value": value}).json()
+            if spec["step"] == "gate":
+                break
+        shown += view["messages"]
+
+    records = _markers(tmp_path, sid)
+    created = {r["message_id"]: r for r in records if r["event"] == "message_created"}
+    # The gate opened block 1, so its messages are logged too.
+    shown += view["messages"]
+    assert set(created) == {m["id"] for m in shown}
+    for m in shown:
+        for key, value in m.items():
+            if key != "id":
+                assert created[m["id"]][key] == value, (m["id"], key)
+        assert created[m["id"]]["block_index"] == (1 if m in view["messages"] else 0)
+
+    replies = [r for r in records if r["event"] == "llm_response_received"]
+    llm_texts = [m["text"] for m in shown if m["kind"] == "llm"]
+    assert [r["text"] for r in replies] == llm_texts
+    assert all(r["word_count"] == len(r["text"].split()) for r in replies)
+
+
+def test_session_records_the_font_file_hash(client):
+    from app.store import get_store
+
+    sid = client.post("/api/session", json={"participant_id": "TEST002"}).json()["session_id"]
+    row = get_store()._conn.execute(
+        "SELECT payload FROM events WHERE session_id = ? AND event = 'session_started'", (sid,)
+    ).fetchone()
+    assert re.fullmatch(r"[0-9a-f]{64}", json.loads(row["payload"])["ui_font_sha256"])
+
+
+def test_word_layout_events_accepted(client):
+    sid = client.post("/api/session", json={"participant_id": "TEST002"}).json()["session_id"]
+    for name in ("transcript_scroll_began", "layout_changed"):
+        r = client.post(f"/api/session/{sid}/event", json={"event": name, "detail": {"scroll_top": 0}})
+        assert r.status_code == 200, f"{name}: {r.text}"
+
+
+def test_word_layout_audit_joins_rendered_words_to_server_text(client, tmp_path):
+    """check_xdf.py's word audit: the browser's measured words, joined back up,
+    must be the server's text, token for token -- and a single wrong word is
+    caught."""
+    check_xdf = _load_check_xdf()
+    view = client.post("/api/session", json={"participant_id": "TEST002"}).json()
+    sid = view["session_id"]
+    _fake_render(client, sid, view["messages"])
+    bubble = 1
+    while True:
+        if view.get("awaiting_llm"):
+            view = client.post(f"/api/session/{sid}/llm").json()
+        else:
+            spec = view["input"]
+            if spec["type"] == "gate":
+                break
+            value = "55" if spec["type"] == "numeric" else WORDS
+            kind = "user-numeric" if spec["type"] == "numeric" else "user-text"
+            _fake_render(client, sid, [{"id": f"u{bubble}", "kind": kind, "text": value}], kind)
+            bubble += 1
+            view = client.post(f"/api/session/{sid}/submit",
+                               json={"step": spec["step"], "value": value}).json()
+        _fake_render(client, sid, view["messages"])
+
+    records = _markers(tmp_path, sid)
+    audit = check_xdf.audit_layout(records)
+    assert audit.created == audit.measured > 0
+    assert audit.mismatched == [] and audit.unmeasured == [] and audit.user_unmatched == []
+    assert set(audit.fonts) == {config.UI_FONT_FAMILY}
+
+    # One word swapped in the vignette's scenario text.
+    vignette = next(r["message_id"] for r in records
+                    if r["event"] == "message_created" and r["kind"] == "vignette")
+    for rec in records:
+        for part in rec.get("layout") or []:
+            if part["id"] == vignette and part["part"] == "text":
+                part["words"][3]["t"] = "WRONG"
+    audit = check_xdf.audit_layout(records)
+    assert len(audit.mismatched) == 1 and "word 3 differs" in audit.mismatched[0]
