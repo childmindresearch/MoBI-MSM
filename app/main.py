@@ -8,6 +8,7 @@ the response is returned.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from . import config, prompts
 from .content import ContentError, ContentLibrary
 from .llm import LLMError, get_client
 from .markers import get_stream, lsl_available
-from .session import FlowError, Session, ValidationError, now_iso
+from .session import FlowError, Session, StepView, ValidationError, now_iso
 from .store import get_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -39,6 +40,8 @@ sessions: dict[str, Session] = {}
 # rejected so the browser cannot write arbitrary entries into the record.
 CLIENT_EVENTS = frozenset({
     "messages_rendered",
+    "layout_changed",
+    "transcript_scroll_began",
     "transcript_scrolled",
     "fixation_cross_shown",
     "fixation_cross_hidden",
@@ -113,6 +116,15 @@ def font_installed() -> bool:
     return (STATIC_DIR / config.UI_FONT_FILE).is_file()
 
 
+def font_sha256() -> str | None:
+    """Hash of the pinned font file, so a recording names the exact face whose
+    metrics laid out its words -- not just a family name two files could share."""
+    path = STATIC_DIR / config.UI_FONT_FILE
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _library() -> ContentLibrary:
     if library is None:
         raise HTTPException(503, "Content library not loaded")
@@ -147,6 +159,15 @@ def _mark(session: Session | None, event: str, **payload: Any) -> None:
         **payload,
     )
     get_store().record_event(record)
+
+
+def _mark_messages(session: Session, view: StepView) -> None:
+    """One message_created per message the server is about to hand the browser,
+    carrying the literal text. The browser's messages_rendered reports where each
+    word of it landed, keyed by the same message_id."""
+    for message in view.messages:
+        _mark(session, "message_created", message_id=message.id, **{
+            k: v for k, v in message.to_dict().items() if k != "id"})
 
 
 # --- request models ---
@@ -274,6 +295,7 @@ def start_session(req: ParticipantRequest) -> dict[str, Any]:
     _mark(session, "session_started", block_count=len(plan.blocks),
           ui_font=config.UI_FONT_FAMILY if font_installed() else "SYSTEM-FALLBACK",
           font_installed=font_installed(),
+          ui_font_sha256=font_sha256(),
           # Recorded so AOI rectangles convert to degrees of visual angle
           # without needing any knowledge outside the data.
           px_per_degree=round(config.PX_PER_DEGREE, 3),
@@ -291,6 +313,7 @@ def start_session(req: ParticipantRequest) -> dict[str, Any]:
           vignette=session.block.vignette.label,
           stance=session.block.stance.label,
           ends_with_question=session.block.ends_with_question)
+    _mark_messages(session, view)
 
     return {"session_id": session.session_id, **view.to_dict()}
 
@@ -325,6 +348,7 @@ def submit(session_id: str, req: SubmitRequest) -> dict[str, Any]:
               vignette=session.block.vignette.label,
               stance=session.block.stance.label,
               ends_with_question=session.block.ends_with_question)
+    _mark_messages(session, view)
 
     if view.done:
         _finish(session)
@@ -358,7 +382,8 @@ def llm_turn(session_id: str) -> dict[str, Any]:
           elicited=result.elicited,
           model=result.model, provider=result.provider,
           requested_at=result.requested_at, received_at=result.received_at,
-          word_count=len(result.text.split()))
+          word_count=len(result.text.split()), text=result.text)
+    _mark_messages(session, view)
     return view.to_dict()
 
 

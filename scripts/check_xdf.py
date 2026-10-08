@@ -835,8 +835,155 @@ def check_coverage(out: Out, rep: Report, pyxdf, path: Path, markers: list[Marke
                              f"the markers on the same clock")
 
 
+# --- word layout ----------------------------------------------------------
+
+def expected_parts(created: dict[str, Any]) -> dict[str, str]:
+    """The text each measured part of a message should hold, as the browser
+    shows it. The vignette card is measured in parts; the scale anchors are
+    displayed with their number in front."""
+    if created.get("kind") != "vignette":
+        return {"text": str(created.get("text", ""))}
+    parts = {"text": str(created.get("text", ""))}
+    for key in ("instruction", "question"):
+        if created.get(key):
+            parts[key] = str(created[key])
+    if created.get("scale_low"):
+        parts["scale_low"] = f"0 = {created['scale_low']}"
+    if created.get("scale_high"):
+        parts["scale_high"] = f"100 = {created['scale_high']}"
+    return parts
+
+
+@dataclass
+class LayoutAudit:
+    created: int = 0
+    measured: int = 0
+    words: int = 0
+    reflows: int = 0
+    unmeasured: list[str] = field(default_factory=list)
+    mismatched: list[str] = field(default_factory=list)
+    """Message and part, plus where the words diverge. Never the words
+    themselves: some of them are the participant's."""
+    user_unmatched: list[str] = field(default_factory=list)
+    fonts: Counter = field(default_factory=Counter)
+
+
+def _first_family(family: str) -> str:
+    return family.split(",")[0].strip().strip("'\"")
+
+
+def _diverge(expected: list[str], got: list[str]) -> str:
+    for i, (a, b) in enumerate(zip(expected, got)):
+        if a != b:
+            return f"word {i} differs"
+    return f"{len(got)} words measured, {len(expected)} expected"
+
+
+def audit_layout(records: list[dict[str, Any]]) -> LayoutAudit:
+    """Check every message's measured words against the text the server sent.
+
+    message_created carries what the server sent; messages_rendered (and
+    layout_changed, after a reflow) carries the words the browser laid out, one
+    whitespace-delimited token each. Joined back up they must be the same
+    tokens, or a word box is pointing at the wrong word.
+    """
+    audit = LayoutAudit()
+    created: dict[str, dict[str, Any]] = {}
+    layout: dict[tuple[str, str], list[str]] = {}
+    user_layouts: dict[int | None, list[list[str]]] = {}
+    submitted: list[tuple[int | None, str, str]] = []
+
+    for rec in records:
+        event = rec.get("event")
+        if event == "message_created":
+            created[str(rec.get("message_id"))] = rec
+        elif event in ("messages_rendered", "layout_changed"):
+            if event == "layout_changed":
+                audit.reflows += 1
+            kinds = {g.get("id"): g.get("kind") for g in rec.get("geometry") or []}
+            for part in rec.get("layout") or []:
+                tokens = [w.get("t") for w in part.get("words") or []]
+                key = (str(part.get("id")), str(part.get("part")))
+                layout[key] = tokens
+                audit.fonts[_first_family(str((part.get("font") or {}).get("family", "?")))] += 1
+                if event == "messages_rendered" and kinds.get(part.get("id")) == "user-text":
+                    user_layouts.setdefault(rec.get("block_index"), []).append(tokens)
+        elif event == "submission_recorded":
+            for key, value in rec.items():
+                if key.startswith("user_text_") and not key.endswith("_words"):
+                    submitted.append((rec.get("block_index"), key, str(value)))
+
+    audit.created = len(created)
+    for mid, rec in created.items():
+        parts = expected_parts(rec)
+        if not any((mid, part) in layout for part in parts):
+            audit.unmeasured.append(mid)
+            continue
+        audit.measured += 1
+        for part, text in parts.items():
+            got = layout.get((mid, part))
+            want = text.split()
+            if got is None:
+                audit.mismatched.append(f"{mid} {part}: not measured")
+            elif got != want:
+                audit.mismatched.append(f"{mid} {part}: {_diverge(want, got)}")
+            else:
+                audit.words += len(got)
+
+    for block, key, text in submitted:
+        if text.split() not in user_layouts.get(block, []):
+            audit.user_unmatched.append(f"block {block} {key}")
+    return audit
+
+
+def check_layout(out: Out, rep: Report, markers: list[Marker]) -> None:
+    audit = audit_layout([m.rec for m in markers])
+    any_layout = any(m.get("layout") for m in markers if m.event == "messages_rendered")
+    if not audit.created and not any_layout:
+        out.line("Words", "no word layout in this recording (made before word-level markers)")
+        return
+    if not any_layout:
+        rep.add(FIX, "The server logged its messages but the browser reported no word layout.",
+                "The browser is running an older app.js. Reload the page before the next "
+                "session; until then, word-level gaze analysis needs the screen recording.")
+        return
+
+    out.line("Words", f"{audit.measured}/{audit.created} messages laid out · "
+                      f"{audit.words:,} words match the server's text")
+    if audit.mismatched:
+        rep.add(FIX, f"{plural(len(audit.mismatched), 'message part')} laid out different "
+                     f"words from the text the server sent.",
+                *audit.mismatched[:4],
+                "Word boxes there point at the wrong words. This is a bug in how app.js "
+                "renders or measures that message.")
+    if audit.user_unmatched:
+        rep.add(NOTE, f"{plural(len(audit.user_unmatched), 'typed answer')} "
+                     f"{'has' if len(audit.user_unmatched) == 1 else 'have'} no matching "
+                     f"word layout in the transcript.",
+                *audit.user_unmatched[:4],
+                "Either its messages_rendered marker did not arrive, or the bubble showed "
+                "different words from the submission.")
+    if audit.unmeasured:
+        rep.add(NOTE, f"{plural(len(audit.unmeasured), 'message')} never reported a word "
+                      f"layout.",
+                ", ".join(audit.unmeasured[:8]),
+                "Its messages_rendered marker did not arrive. Word positions for it are only "
+                "in the screen recording.")
+    off = {f: n for f, n in audit.fonts.items() if f != config.UI_FONT_FAMILY}
+    if off:
+        rep.add(FIX, f"Some text was laid out in a font stack not led by "
+                     f"{config.UI_FONT_FAMILY}.", counted(Counter(off)),
+                "Word boxes measured in another font do not match the pinned metrics.")
+    if audit.reflows:
+        out.cont(f"column reflowed {plural(audit.reflows, 'time')}; words were re-measured")
+        rep.add(NOTE, f"The transcript column changed width {plural(audit.reflows, 'time')}.",
+                "Every word was re-measured (layout_changed). Use the newest layout from each "
+                "change onward.")
+
+
 SKIP_IN_TIMELINE = frozenset({"user_text_1", "user_text_2", "user_text_3", "t_lsl", "t_unix",
-                              "t_iso", "session_id", "participant_id", "block_index", "event"})
+                              "t_iso", "session_id", "participant_id", "block_index", "event",
+                              "text", "instruction", "question", "layout", "geometry"})
 
 
 def print_timeline(markers: list[Marker]) -> None:
@@ -850,7 +997,8 @@ def print_timeline(markers: list[Marker]) -> None:
             if k not in SKIP_IN_TIMELINE and v is not None and not isinstance(v, dict)
         )
         print(f"  {m.ts - origin:9.3f}  {m.event:<26} {where:<5} {detail[:88]}")
-    print(f"\n{len(markers):,} markers. Participant free text is not shown.")
+    print(f"\n{len(markers):,} markers. Message text and participant free text are not "
+          f"shown.")
 
 
 def _short(value: Any) -> str:
@@ -955,6 +1103,7 @@ def main() -> int:
     check_design(out, rep, started)
     check_llm(out, rep, markers)
     check_fixation(out, rep, markers)
+    check_layout(out, rep, markers)
     check_attention(out, rep, markers)
     if not args.no_coverage:
         check_coverage(out, rep, pyxdf, args.xdf, markers, stream_id)
